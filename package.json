@@ -1,0 +1,9 @@
+{
+  "name": "sit-show",
+  "version": "1.0.0",
+  "description": "Sit Show — Musical Chairs Royale. A multiplayer browser game show.",
+  "private": true,
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" }
+}

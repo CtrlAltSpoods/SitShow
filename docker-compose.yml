@@ -1,0 +1,11 @@
+services:
+  sitshow:
+    build: .
+    container_name: sitshow
+    ports:
+      - "3000:3000"
+    volumes:
+      # Drop MP3s into ./data/music — they appear in the host's song picker.
+      # Player levels are saved to ./data/profiles.json.
+      - ./data:/data
+    restart: unless-stopped
