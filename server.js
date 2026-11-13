@@ -9,12 +9,16 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { GROUPS, makePuzzles } = require('./puzzles');
+const { openDb, nameKey } = require('./db');
+const webauthn = require('./webauthn');
 
 const PORT = +process.env.PORT || 3000;
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const MUSIC_DIR = path.resolve(process.env.MUSIC_DIR || path.join(DATA_DIR, 'music'));
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const PROFILE_FILE = path.join(DATA_DIR, 'profiles.json');
+const PROFILE_FILE = path.join(DATA_DIR, 'profiles.json'); // old format, imported once
+const DB_FILE = path.join(DATA_DIR, 'sitshow.db');
+const PUBLIC_ORIGINS = String(process.env.PUBLIC_ORIGIN || '').split(',').map((s) => s.trim().replace(/\/+$/, '')).filter(Boolean);
 
 const AVATAR_GRACE_MS = +process.env.AVATAR_GRACE_MS || 5 * 60 * 1000; // avatars survive 5 minutes after disconnect
 const RECONNECT_GRACE_MS = +process.env.RECONNECT_GRACE_MS || 60 * 1000; // a dropped player keeps their spot this long
@@ -34,7 +38,7 @@ if (typeof process.getuid === 'function' && process.getuid() === 0 && process.en
   const uid = +process.env.PUID, gid = +(process.env.PGID || process.env.PUID);
   try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
   try { fs.mkdirSync(MUSIC_DIR, { recursive: true }); } catch {}
-  for (const p of [DATA_DIR, PROFILE_FILE, PROFILE_FILE + '.tmp', MUSIC_DIR]) {
+  for (const p of [DATA_DIR, PROFILE_FILE, DB_FILE, DB_FILE + '-wal', DB_FILE + '-shm', MUSIC_DIR]) {
     try { if (fs.existsSync(p)) fs.chownSync(p, uid, gid); } catch {} // read-only music mounts are fine
   }
   try { process.setgid(gid); process.setuid(uid); console.log(`Running as ${uid}:${gid}`); }
@@ -87,7 +91,6 @@ const levelForXp = (xp) => Math.max(1, Math.floor((1 + Math.sqrt(1 + (4 * xp) / 
 const catalogItem = (kind, id) => CATALOG[kind].find((x) => x.id === id);
 
 // ───────────────────────────── helpers ─────────────────────────────
-const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 const rnd = (n) => Math.floor(Math.random() * n);
 const pick = (arr) => arr[rnd(arr.length)];
 const clampInt = (v, a, b, d) => { const n = Math.round(Number(v)); return Number.isFinite(n) ? Math.min(b, Math.max(a, n)) : d; };
@@ -96,32 +99,44 @@ function cleanText(v, max) {
   return [...s].slice(0, max).join('');
 }
 
-// ───────────────────────────── profiles (levels persist on the data volume) ─────────────────────────────
-let profiles = {};
-try { profiles = JSON.parse(fs.readFileSync(PROFILE_FILE, 'utf8')) || {}; } catch { profiles = {}; }
-{ // prune throwaway profiles that never earned anything
-  const cutoff = Date.now() - 30 * 86400e3;
-  for (const k of Object.keys(profiles)) if (!profiles[k].xp && (profiles[k].seen || 0) < cutoff) delete profiles[k];
+// ───────────────────────────── players (SQLite: data/sitshow.db) ─────────────────────────────
+const store = openDb(DB_FILE, PROFILE_FILE);
+process.on('SIGTERM', () => { store.close(); process.exit(0); });
+process.on('SIGINT', () => { store.close(); process.exit(0); });
+const profCache = new Map(); // id -> live player row (the object rooms hold on to)
+function loadProf(row) {
+  let p = profCache.get(row.id);
+  if (!p) { p = { ...row }; profCache.set(row.id, p); }
+  return p;
 }
-let saveTimer = null;
-let saveWarned = false;
-function saveProfiles() {
-  if (saveTimer) return;
-  saveTimer = setTimeout(() => {
-    saveTimer = null;
-    const tmp = PROFILE_FILE + '.tmp';
-    fs.writeFile(tmp, JSON.stringify(profiles), (e) => {
-      if (e) { if (!saveWarned) { saveWarned = true; console.warn('Cannot save profiles:', e.message); } return; }
-      fs.rename(tmp, PROFILE_FILE, () => {});
-    });
-  }, 1500);
+function saveProf(p) { try { store.save(p); } catch (e) { console.warn('Could not save player', p.id, e.message); } }
+
+// Account names are reserved; bot names belong to the studio.
+const BOT_KEYS = new Set(['Sir Sits-a-Lot', 'Stool Pigeon', 'Recliner Rex', 'Cushion Crusher', 'Wobbly Wanda', 'Beanbag Bob',
+  'Ottoman Empire', 'Lazy Susan', 'Deck Chair Dave', 'Throne Ranger', 'Squeaky Hinge', 'Pouffe Daddy'].map(nameKey));
+function nameBlocked(name, id) {
+  const key = nameKey(name);
+  if (!key) return false;
+  if (BOT_KEYS.has(key)) return true;
+  const owner = store.nameOwner(key);
+  return !!owner && owner !== id;
 }
-function flushProfiles() { try { fs.writeFileSync(PROFILE_FILE, JSON.stringify(profiles)); } catch {} }
-process.on('SIGTERM', () => { flushProfiles(); process.exit(0); });
-process.on('SIGINT', () => { flushProfiles(); process.exit(0); });
+const guestName = () => 'Contestant ' + (1000 + rnd(9000));
+function evictName(key, exceptId) { // a name was just reserved: guests using it get a new one
+  for (const c of byPid.values()) {
+    const p = c.prof;
+    if (c.pid === exceptId || p.account || nameKey(p.name) !== key) continue;
+    p.name = guestName(); saveProf(p);
+    c.send({ t: 'me', me: meInfo(c) });
+    c.send({ t: 'toast', msg: `Your name was reserved by an account holder, so you're now "${p.name}". Change it any time.` });
+    if (c.room) pushState(c.room);
+  }
+}
 
 // ───────────────────────────── music (folders = categories) ─────────────────────────────
 const STREAM_SAFE_RE = /^stream[\s_-]*safe$/i;
+const INTRO_RE = /^intro[\s_-]*music$/i;      // optional: played before each round (instead of the built-in vamp)
+const THINKING_RE = /^thinking[\s_-]*music$/i; // optional: played while players grab seats
 let songCache = { at: 0, list: [] };
 function listSongs() {
   if (Date.now() - songCache.at < 3000) return songCache.list;
@@ -145,14 +160,19 @@ function listSongs() {
   return out;
 }
 const songCat = (s) => (s.includes('/') ? s.slice(0, s.indexOf('/')) : '');
+const isBed = (s) => INTRO_RE.test(songCat(s)) || THINKING_RE.test(songCat(s));
+const roundSongs = () => listSongs().filter((s) => !isBed(s));
 function musicInfo() {
-  const songs = listSongs();
+  const all = listSongs();
+  const songs = all.filter((s) => !isBed(s));
   const counts = new Map();
   for (const s of songs) counts.set(songCat(s), (counts.get(songCat(s)) || 0) + 1);
   return {
     songs,
     cats: [...counts].map(([name, n]) => ({ name, n })).sort((a, b) => a.name.localeCompare(b.name)),
     streamSafe: songs.filter((s) => STREAM_SAFE_RE.test(songCat(s))),
+    intro: all.filter((s) => INTRO_RE.test(songCat(s))),
+    thinking: all.filter((s) => THINKING_RE.test(songCat(s))),
   };
 }
 
@@ -174,7 +194,7 @@ const normAnswer = (a) => String(a == null ? '' : a).trim().toLowerCase().replac
 
 // ───────────────────────────── rooms ─────────────────────────────
 const conns = new Set();
-const byPid = new Map();
+const byPid = new Map(); // player id -> live connection
 const rooms = new Map();
 
 const BOT_NAMES = ['Sir Sits-a-Lot', 'Stool Pigeon', 'Recliner Rex', 'Cushion Crusher', 'Wobbly Wanda', 'Beanbag Bob',
@@ -202,7 +222,7 @@ function applySettings(room, m) {
   }
   if ('song' in m) {
     const v = String(m.song);
-    if (v === 'random' || (listSongs().includes(v) && (s.category === 'all' || songCat(v) === s.category))) s.song = v;
+    if (v === 'random' || (roundSongs().includes(v) && (s.category === 'all' || songCat(v) === s.category))) s.song = v;
   }
   if ('musicMin' in m) { s.musicMin = clampInt(m.musicMin, 3, 90, s.musicMin); if (s.musicMax < s.musicMin) s.musicMax = s.musicMin; }
   if ('musicMax' in m) { s.musicMax = clampInt(m.musicMax, 3, 90, s.musicMax); if (s.musicMin > s.musicMax) s.musicMin = s.musicMax; }
@@ -223,6 +243,8 @@ function meInfo(conn) {
     levelXp: xpForLevel(level), nextXp: xpForLevel(level + 1),
     dance: p.dance, death: p.death, ring: p.ring,
     av: avatars.get(conn.pid)?.hash || null,
+    account: !!p.account, reserved: !!p.name_key,
+    passkeys: p.account ? store.credentials(p.id).length : 0,
   };
 }
 function pubPlayer(p) {
@@ -231,7 +253,7 @@ function pubPlayer(p) {
     id: p.id, name: prof.name, level: p.bot ? p.level : levelForXp(prof.xp),
     av: p.bot ? null : avatars.get(p.id)?.hash || null, face: p.face || null,
     dance: prof.dance, death: prof.death, ring: prof.ring,
-    inGame: p.inGame, alive: p.alive, seat: p.seat, pick: p.pick, bot: !!p.bot, away: !p.bot && !p.conn,
+    inGame: p.inGame, alive: p.alive, seat: p.seat, pick: p.pick, bot: !!p.bot, away: !p.bot && !p.conn, acct: !!prof.account,
   };
 }
 function roomState(room) {
@@ -312,7 +334,7 @@ function startGame(room) {
   beginRound(room);
 }
 function pickSong(room) {
-  const s = room.settings, songs = listSongs();
+  const s = room.settings, songs = roundSongs();
   const pool = s.category === 'all' ? songs : songs.filter((x) => songCat(x) === s.category);
   if (s.song !== 'random' && pool.includes(s.song)) return s.song;
   if (!pool.length) return null; // the client's built-in House Band plays instead
@@ -422,9 +444,9 @@ function endGame(room) {
         if (it.level > before && it.level <= after) unlocked.push({ kind, name: it.name || it.e });
       }
     }
+    saveProf(p.prof);
     if (p.conn) p.conn.send({ t: 'xp', gained, leveled: after > before, unlocked, me: meInfo(p.conn) });
   }
-  saveProfiles();
   setPhaseTimer(room, T_GAMEOVER, () => resetToLobby(room));
   pushState(room);
 }
@@ -558,7 +580,14 @@ const handlers = {
   setName(conn, m) {
     const name = cleanText(m.name, 16);
     if (!name) return;
-    conn.prof.name = name; saveProfiles();
+    const p = conn.prof, key = nameKey(name);
+    if (nameBlocked(name, p.id) || (p.account && !store.reserve(p.id, key))) {
+      conn.send({ t: 'nameTaken', name });
+      return conn.send({ t: 'me', me: meInfo(conn) });
+    }
+    p.name = name;
+    if (p.account) { p.name_key = key || null; evictName(key, p.id); }
+    saveProf(p);
     conn.send({ t: 'me', me: meInfo(conn) });
     if (conn.room) { pushState(conn.room); pushLobby(); }
   },
@@ -569,7 +598,7 @@ const handlers = {
       const it = catalogItem(kind, String(m[field]));
       if (it && it.level <= level) conn.prof[field] = it.id;
     }
-    saveProfiles();
+    saveProf(conn.prof);
     conn.send({ t: 'me', me: meInfo(conn) });
     if (conn.room) pushState(conn.room);
   },
@@ -653,18 +682,20 @@ function onMessage(conn, text) {
     if (m.t !== 'hello') return;
     const token = String(m.token || '');
     if (!/^[a-f0-9]{32,64}$/.test(token)) return conn.close();
-    const pid = sha('pid:' + token).slice(0, 12);
+    let row;
+    try { row = store.playerForToken(token, cleanText(m.name, 16), (n, id) => !nameBlocked(n, id)); }
+    catch (e) { console.error('session lookup failed', e); return conn.close(); }
+    const pid = row.id;
     const old = byPid.get(pid);
     if (old) { // same player opened a new connection (refresh, network change, other tab): the newest wins
       byPid.delete(pid);
       old.send({ t: 'replaced' });
       old.end();
     }
-    const key = sha('profile:' + token);
-    let prof = profiles[key];
-    if (!prof) prof = profiles[key] = { name: cleanText(m.name, 16) || 'Contestant ' + (1000 + rnd(9000)), xp: 0, dance: 'strut', death: 'poof', ring: 'none' };
-    prof.seen = now; saveProfiles();
-    conn.pid = pid; conn.prof = prof;
+    const prof = loadProf(row);
+    if (!prof.account && nameBlocked(prof.name, pid)) prof.name = guestName(); // someone reserved it meanwhile
+    saveProf(prof);
+    conn.pid = pid; conn.prof = prof; conn.tokenHash = store.tokenHash(token);
     byPid.set(pid, conn);
     const av = avatars.get(pid);
     if (av) clearTimeout(av.timer); // reconnected inside the grace period
@@ -761,10 +792,12 @@ setInterval(() => {
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.webmanifest': 'application/manifest+json' };
 function sendJson(res, code, obj) { res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(obj)); }
-function tokenConn(req) {
+function tokenConn(req) { // the live connection belonging to the browser token in the request
   const token = String(req.headers['x-token'] || '');
   if (!/^[a-f0-9]{32,64}$/.test(token)) return null;
-  return byPid.get(sha('pid:' + token).slice(0, 12)) || null;
+  const th = store.tokenHash(token);
+  for (const c of byPid.values()) if (c.tokenHash === th) return c;
+  return null;
 }
 function avatarChanged(conn) {
   conn.send({ t: 'me', me: meInfo(conn) });
@@ -787,6 +820,109 @@ function serveFile(req, res, file, type, extraHeaders = {}) {
     if (req.method === 'HEAD') return res.end();
     fs.createReadStream(file).on('error', () => res.destroy()).pipe(res);
   });
+}
+
+// ───────────────────────────── passkeys (WebAuthn) ─────────────────────────────
+const regPending = new Map();   // session token hash -> { challenge, origin, rpId, exp }
+const loginPending = new Map(); // challenge -> { origin, rpId, exp }
+setInterval(() => {
+  const now = Date.now();
+  for (const m of [regPending, loginPending]) for (const [k, v] of m) if (v.exp < now) m.delete(k);
+}, 60000).unref();
+
+function readJson(req, res, cb) {
+  const chunks = []; let size = 0, dead = false;
+  req.on('data', (c) => { if (dead) return; size += c.length; if (size > 64 * 1024) { dead = true; sendJson(res, 413, { error: 'too large' }); req.destroy(); } else chunks.push(c); });
+  req.on('end', () => {
+    if (dead) return;
+    let body = {};
+    try { if (size) body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return sendJson(res, 400, { error: 'bad json' }); }
+    cb(body && typeof body === 'object' ? body : {});
+  });
+}
+/** Who we are, as far as passkeys are concerned: the page's origin and the domain (RP ID). */
+function relyingParty(req) {
+  const origin = String(req.headers.origin || '').replace(/\/+$/, '');
+  let u;
+  try { u = new URL(origin); } catch { throw new Error('Missing Origin header'); }
+  if (PUBLIC_ORIGINS.length) {
+    if (!PUBLIC_ORIGINS.includes(origin)) throw new Error(`Origin ${origin} is not in PUBLIC_ORIGIN`);
+  } else {
+    const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+    if (u.host !== host) throw new Error('This address does not match the server — set PUBLIC_ORIGIN to your HTTPS address');
+  }
+  const local = u.hostname === 'localhost' || u.hostname.endsWith('.localhost');
+  if (u.protocol !== 'https:' && !local) throw new Error('Passkeys need an HTTPS address');
+  if (/^[\d.]+$/.test(u.hostname) || u.hostname.includes(':')) throw new Error('Passkeys need a domain name, not an IP address');
+  return { origin, rpId: process.env.RP_ID || u.hostname };
+}
+const newChallenge = () => webauthn.b64u.enc(crypto.randomBytes(32));
+function passkeyRoute(pathname, req, res, body) {
+  const now = Date.now();
+  const token = String(req.headers['x-token'] || '');
+
+  if (pathname === '/api/logout') {
+    if (/^[a-f0-9]{32,64}$/.test(token)) store.endSession(token);
+    return sendJson(res, 200, { ok: true });
+  }
+  const rp = relyingParty(req);
+
+  if (pathname === '/api/passkey/register-options') { // create an account (or add a passkey to one)
+    const conn = tokenConn(req);
+    if (!conn) return sendJson(res, 401, { error: 'Not connected — refresh the page and try again' });
+    const p = conn.prof;
+    if (!p.account && nameBlocked(p.name, p.id)) return sendJson(res, 409, { error: `"${p.name}" is already reserved — pick another name first` });
+    const challenge = newChallenge();
+    regPending.set(conn.tokenHash, { challenge, ...rp, exp: now + 5 * 60000 });
+    return sendJson(res, 200, {
+      challenge,
+      rp: { name: 'Sit Show', id: rp.rpId },
+      user: { id: webauthn.b64u.enc(Buffer.from(p.id)), name: `${p.name} (${p.id})`, displayName: p.name },
+      pubKeyCredParams: [-7, -8, -257].map((alg) => ({ type: 'public-key', alg })),
+      timeout: 120000, attestation: 'none',
+      authenticatorSelection: { residentKey: 'required', requireResidentKey: true, userVerification: 'preferred' },
+      excludeCredentials: store.credentials(p.id).map((c) => ({ type: 'public-key', id: c.id })),
+    });
+  }
+  if (pathname === '/api/passkey/register') {
+    const conn = tokenConn(req);
+    if (!conn) return sendJson(res, 401, { error: 'Not connected — refresh the page and try again' });
+    const pend = regPending.get(conn.tokenHash);
+    regPending.delete(conn.tokenHash);
+    if (!pend || pend.exp < now) return sendJson(res, 400, { error: 'That took too long — try again' });
+    const cred = webauthn.verifyRegistration(body, pend);
+    if (store.credential(cred.id)) return sendJson(res, 409, { error: 'That passkey is already registered' });
+    const p = conn.prof;
+    if (!p.account) {
+      const key = nameKey(p.name) || null;
+      if (nameBlocked(p.name, p.id) || !store.makeAccount(p.id, key)) return sendJson(res, 409, { error: `"${p.name}" is already reserved — pick another name first` });
+      p.account = 1; p.name_key = key;
+      if (key) evictName(key, p.id);
+    }
+    store.addCredential({ ...cred, playerId: p.id });
+    conn.send({ t: 'me', me: meInfo(conn) });
+    if (conn.room) pushState(conn.room);
+    return sendJson(res, 200, { ok: true, id: p.id });
+  }
+  if (pathname === '/api/passkey/login-options') {
+    if (loginPending.size > 5000) return sendJson(res, 429, { error: 'Busy — try again in a minute' });
+    const challenge = newChallenge();
+    loginPending.set(challenge, { challenge, ...rp, exp: now + 5 * 60000 });
+    return sendJson(res, 200, { challenge, rpId: rp.rpId, timeout: 120000, userVerification: 'preferred' });
+  }
+  if (pathname === '/api/passkey/login') {
+    const ch = webauthn.challengeOf(body);
+    const pend = ch && loginPending.get(ch);
+    if (ch) loginPending.delete(ch);
+    if (!pend || pend.exp < now || pend.origin !== rp.origin) return sendJson(res, 400, { error: 'That took too long — try again' });
+    const stored = store.credential(String(body.id || ''));
+    if (!stored) return sendJson(res, 404, { error: 'This passkey isn\'t registered here (it may belong to a deleted account)' });
+    const signCount = webauthn.verifyAssertion(body, stored, pend);
+    store.useCredential(stored.id, signCount);
+    const player = store.player(stored.player_id);
+    return sendJson(res, 200, { token: store.newSession(player.id), id: player.id, name: player.name });
+  }
+  sendJson(res, 404, { error: 'not found' });
 }
 
 const server = http.createServer((req, res) => {
@@ -830,6 +966,14 @@ const server = http.createServer((req, res) => {
       sendJson(res, 200, { hash });
     });
     return;
+  }
+
+  if (pathname.startsWith('/api/passkey/') || pathname === '/api/logout') {
+    if (req.method !== 'POST') return sendJson(res, 405, { error: 'method' });
+    return readJson(req, res, (body) => {
+      try { passkeyRoute(pathname, req, res, body); }
+      catch (e) { sendJson(res, 400, { error: e.message || 'failed' }); }
+    });
   }
 
   if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405); return res.end(); }

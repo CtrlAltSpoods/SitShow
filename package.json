@@ -4,6 +4,6 @@
   "description": "Sit Show — Musical Chairs Royale. A multiplayer browser game show.",
   "private": true,
   "main": "server.js",
-  "scripts": { "start": "node server.js" },
-  "engines": { "node": ">=18" }
+  "scripts": { "start": "node --disable-warning=ExperimentalWarning server.js" },
+  "engines": { "node": ">=22.13" }
 }

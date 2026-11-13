@@ -87,6 +87,11 @@ const on = {
     else send({ t: 'peek', code: wantRoom });
   },
   me(m) { S.me = m.me; renderMe(); },
+  nameTaken(m) {
+    const msg = `"${m.name}" is reserved by another player — pick a different name.`;
+    toast(msg);
+    if (!$('invite').hidden) { $('invErr').hidden = false; $('invErr').textContent = msg; }
+  },
   rooms(m) { S.rooms = m.rooms; renderRoomList(); },
   music(m) { S.music = m; hostKey = ''; renderHost(); },
   toast(m) { toast(String(m.msg)); },
@@ -226,6 +231,7 @@ function renderMe() {
   $('homeXpText').textContent = `${me.xp - me.levelXp} / ${me.nextXp - me.levelXp} XP`;
   renderEmoteBar();
   renderWardrobe();
+  renderAccount();
 }
 function renderRoomList() {
   const list = $('roomList'); list.textContent = '';
@@ -278,13 +284,106 @@ $('invitePwBtn').addEventListener('click', async () => { if (await copyText(invi
 // streamer mode: stream-safe music only, room codes hidden
 function applyStreamer() {
   for (const c of $$('[data-streamer]')) c.checked = S.streamer;
-  if (S.room) { onRoomUpdate(S.room); if (S.room.phase === 'music') { startMusic(S.room); banner('', musicLine(S.room)); } }
+  const r = S.room;
+  if (!r) return;
+  onRoomUpdate(r);
+  if (r.phase === 'music') { startMusic(r); banner('', musicLine(r)); }
+  else if (r.phase === 'scramble') Snd.bed('think', bedFile(r, 'think'));
+  else if (r.phase !== 'results') preRoundBed(r);
 }
 for (const c of $$('[data-streamer]')) c.addEventListener('change', (e) => {
   S.streamer = e.target.checked; LS.set('sitshow.streamer', S.streamer ? '1' : '0');
   if (S.streamer) toast(S.music.streamSafe.length ? '🎥 Streamer mode on — playing only your "Stream Safe" folder.' : '🎥 Streamer mode on — the built-in House Band will play (add a "Stream Safe" music folder for your own tracks).', 'good', 5000);
   applyStreamer();
 });
+
+// ───────────────────────────── accounts (passkeys) ─────────────────────────────
+const b64u = {
+  enc: (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+  dec: (s) => { s = s.replace(/-/g, '+').replace(/_/g, '/'); s += '='.repeat((4 - (s.length % 4)) % 4); return Uint8Array.from(atob(s), (c) => c.charCodeAt(0)); },
+};
+function passkeyBlocked() {
+  if (!window.isSecureContext) return 'Passkeys need a secure (https://) address. Ask whoever runs this Sit Show to put it behind HTTPS with a domain name.';
+  if (!window.PublicKeyCredential || !navigator.credentials) return 'This browser doesn\'t support passkeys.';
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(location.hostname)) return 'Passkeys need a domain name, not an IP address.';
+  return '';
+}
+async function api(path, body) {
+  const res = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-token': token }, body: JSON.stringify(body || {}) });
+  let j = {}; try { j = await res.json(); } catch {}
+  if (!res.ok) throw new Error(j.error || 'Something went wrong');
+  return j;
+}
+function passkeyError(e) {
+  if (e && e.name === 'NotAllowedError') return 'Passkey request cancelled.';
+  if (e && e.name === 'InvalidStateError') return 'This device already has a passkey for this account.';
+  if (e && e.name === 'SecurityError') return 'Passkeys aren\'t allowed on this address (it needs HTTPS and a domain name).';
+  return (e && e.message) || 'Passkey failed.';
+}
+function switchToken(t) { // become a different player (signed in / signed out): reconnect with the new token
+  token = t; LS.set('sitshow.token', t); LS.del('sitshow.avatarHash');
+  try { ws.close(); } catch {}
+}
+async function createPasskey() {
+  try {
+    const o = await api('/api/passkey/register-options');
+    const cred = await navigator.credentials.create({ publicKey: {
+      ...o, challenge: b64u.dec(o.challenge), user: { ...o.user, id: b64u.dec(o.user.id) },
+      excludeCredentials: o.excludeCredentials.map((c) => ({ ...c, id: b64u.dec(c.id) })),
+    } });
+    await api('/api/passkey/register', {
+      id: cred.id, rawId: b64u.enc(cred.rawId), type: cred.type,
+      transports: cred.response.getTransports ? cred.response.getTransports() : undefined,
+      response: { clientDataJSON: b64u.enc(cred.response.clientDataJSON), attestationObject: b64u.enc(cred.response.attestationObject) },
+    });
+    toast(S.me.account ? '🔑 Passkey saved. Your account is ready!' : '🔑 Passkey added.', 'good', 5000);
+  } catch (e) { toast(passkeyError(e)); }
+}
+async function signIn() {
+  try {
+    const o = await api('/api/passkey/login-options');
+    const cred = await navigator.credentials.get({ publicKey: { challenge: b64u.dec(o.challenge), rpId: o.rpId, timeout: o.timeout, userVerification: o.userVerification } });
+    const r = await api('/api/passkey/login', {
+      id: cred.id, rawId: b64u.enc(cred.rawId), type: cred.type,
+      response: {
+        clientDataJSON: b64u.enc(cred.response.clientDataJSON), authenticatorData: b64u.enc(cred.response.authenticatorData),
+        signature: b64u.enc(cred.response.signature), userHandle: cred.response.userHandle ? b64u.enc(cred.response.userHandle) : null,
+      },
+    });
+    toast(`🔑 Welcome back, ${r.name}!`, 'good');
+    switchToken(r.token);
+  } catch (e) { toast(passkeyError(e)); }
+}
+async function signOut() {
+  if (!confirm('Sign out on this device? You can sign back in with your passkey any time.')) return;
+  try { await api('/api/logout'); } catch {}
+  toast('Signed out — you\'re playing as a guest now.');
+  switchToken(newToken());
+}
+function renderAccount() {
+  const me = S.me, box = $('acctBox'); if (!me || !box) return;
+  const blocked = passkeyBlocked();
+  box.textContent = '';
+  if (me.account) {
+    box.append(
+      el('div', { class: 'acct-head' }, el('span', { class: 'acct-badge', text: '🔑 ACCOUNT' }), 'Signed in',
+        el('button', { class: 'acct-id', title: 'Your account ID — copy it', text: 'ID ' + me.id, onclick: async () => { if (await copyText(me.id)) toast('Account ID copied.', 'good'); } })),
+      el('p', { class: 'hint', text: (me.reserved ? `"${me.name}" is reserved for you — nobody else can use it. ` : '') + `${me.passkeys} passkey${me.passkeys === 1 ? '' : 's'} on this account.` }),
+      el('div', { class: 'row' },
+        el('button', { class: 'btn small ghost', text: '＋ Add a passkey', disabled: !!blocked, title: 'Add a passkey from another phone, computer or password manager', onclick: createPasskey }),
+        el('button', { class: 'btn small ghost', text: 'Sign out', onclick: signOut })));
+  } else {
+    box.append(
+      el('div', { class: 'acct-head' }, el('span', { class: 'acct-badge guest', text: 'GUEST' }), 'Keep your progress'),
+      el('p', { class: 'hint', text: 'Create an account to keep your level on any device and reserve your name. Your device makes a passkey — no password needed.' }),
+      el('div', { class: 'row' },
+        el('button', { class: 'btn small gold', text: '🔑 Create account', disabled: !!blocked, onclick: createPasskey }),
+        el('button', { class: 'btn small ghost', text: 'Sign in', disabled: !!blocked, onclick: signIn })));
+    if (blocked) box.append(el('p', { class: 'hint', text: blocked }));
+  }
+  $('invSignin').hidden = me.account || !!blocked;
+}
+$('invSignin').addEventListener('click', signIn);
 
 // ───────────────────────────── avatar upload (resized + cached locally) ─────────────────────────────
 const AVATAR_SIZE = 256;
@@ -336,13 +435,19 @@ for (const b of $$('[data-avatar-remove]')) b.addEventListener('click', () => {
 });
 
 // ───────────────────────────── audio ─────────────────────────────
+// Three layers: the round's MP3 (or the House Band), a "bed" under everything else
+// (pre-round vamp / guessing-time ticker, or MP3s from the Intro Music / Thinking Music folders),
+// and sound effects. Synth music is generated here, so it's always stream safe.
 const Snd = (() => {
-  let ac = null, master = null, gen = 0, bandTimer = null;
+  let ac = null, master = null, gen = 0, seq = null, bed = { kind: null, file: null }, wantBed = null;
   let vol = +(LS.get('sitshow.vol') ?? 10) / 100;
+  let urgency = 0;
   const music = new Audio(); music.preload = 'auto'; music.loop = true; music.volume = vol;
+  const bgm = new Audio(); bgm.preload = 'auto'; bgm.loop = true; bgm.volume = vol;
   function unlock() {
     if (ac) { if (ac.state === 'suspended') ac.resume(); return; }
-    try { ac = new (window.AudioContext || window.webkitAudioContext)(); master = ac.createGain(); master.gain.value = vol; master.connect(ac.destination); } catch {}
+    try { ac = new (window.AudioContext || window.webkitAudioContext)(); master = ac.createGain(); master.gain.value = vol; master.connect(ac.destination); } catch { return; }
+    if (wantBed) { const w = wantBed; wantBed = null; startBed(w.kind, w.file, true); } // the bed asked for before the first click
   }
   function tone(f, t0, dur, type = 'sine', g = 0.2, slideTo) {
     const o = ac.createOscillator(), a = ac.createGain();
@@ -375,34 +480,79 @@ const Snd = (() => {
   };
   function sfx(name) { if (!ac || ac.state !== 'running' || !FX[name]) return; FX[name](ac.currentTime + 0.01); }
 
-  // "The House Band": a little synth groove — always stream safe, and used when the music folder is empty
-  function stopBand() { clearInterval(bandTimer); bandTimer = null; }
-  function startBand(rate = 1) {
-    stopBand(); if (!ac) return;
-    const root = [220, 196, 246.9, 261.6][Math.floor(Math.random() * 4)], scale = [0, 3, 5, 7, 10, 12, 15];
-    const mel = Array.from({ length: 32 }, () => (Math.random() < 0.3 ? -1 : Math.floor(Math.random() * scale.length)));
-    const st = 60 / (132 * rate) / 2; let step = 0, next = ac.currentTime + 0.05;
-    bandTimer = setInterval(() => {
-      while (next < ac.currentTime + 0.25) {
-        const b = step % 16;
-        if (b % 4 === 0) tone(120, next, 0.16, 'sine', 0.5, 40);
-        if (b % 4 === 2) noise(next, 0.05, 8000, 6000, 0.12);
-        if (b % 8 === 4) noise(next, 0.14, 1800, 900, 0.25);
-        if (b % 2 === 0) tone((root / 2) * 2 ** ([0, 0, 5, 7][(step >> 4) % 4] / 12), next, st * 1.7, 'triangle', 0.22);
-        const n = mel[step % 32]; if (n >= 0) tone(root * 2 ** (scale[n] / 12), next, st * 0.9, 'square', 0.055);
-        step++; next += st;
-      }
-    }, 60);
+  // ── step sequencer shared by the synth tracks ──
+  function stopSeq() { if (seq) clearInterval(seq.timer); seq = null; }
+  function runSeq(stepLen, fn) {
+    stopSeq(); if (!ac) return;
+    const s = { step: 0, next: ac.currentTime + 0.06 };
+    s.timer = setInterval(() => {
+      while (s.next < ac.currentTime + 0.25) { fn(s.step, s.next); s.step++; s.next += stepLen(); }
+    }, 50);
+    seq = s;
   }
+  const hz = (root, semis) => root * 2 ** (semis / 12);
+  const TRACKS = {
+    // The House Band: the round music when there are no MP3s (or for streamers without a Stream Safe folder)
+    band(rate) {
+      const root = [220, 196, 246.9, 261.6][Math.floor(Math.random() * 4)], scale = [0, 3, 5, 7, 10, 12, 15];
+      const mel = Array.from({ length: 32 }, () => (Math.random() < 0.3 ? -1 : Math.floor(Math.random() * scale.length)));
+      runSeq(() => 60 / (132 * rate) / 2, (step, t) => {
+        const b = step % 16, st = 60 / (132 * rate) / 2;
+        if (b % 4 === 0) tone(120, t, 0.16, 'sine', 0.5, 40);
+        if (b % 4 === 2) noise(t, 0.05, 8000, 6000, 0.12);
+        if (b % 8 === 4) noise(t, 0.14, 1800, 900, 0.25);
+        if (b % 2 === 0) tone(hz(root / 2, [0, 0, 5, 7][(step >> 4) % 4]), t, st * 1.7, 'triangle', 0.22);
+        const n = mel[step % 32]; if (n >= 0) tone(hz(root, scale[n]), t, st * 0.9, 'square', 0.055);
+      });
+    },
+    // Pre-round vamp: a swinging game-show loop (I–vi–ii–V in B♭) with brass stabs and a walking bass
+    vamp() {
+      const root = 116.5, prog = [[0, 4, 7], [9, 12, 16], [2, 5, 9], [7, 11, 14]], walk = [0, 4, 7, 9];
+      runSeq(() => 60 / 116 / 2, (step, t) => {
+        const b = step % 8, bar = (step >> 3) % 4, ch = prog[bar], st = 60 / 116 / 2;
+        if (b % 2 === 0) tone(hz(root, ch[0] + walk[(b >> 1) % 4] - (bar === 1 ? 12 : 0)), t, st * 1.6, 'triangle', 0.26);
+        if (b % 2 === 1) noise(t + st * 0.15, 0.04, 9000, 7000, 0.07); // swung hat
+        if (b === 0 || b === 4) tone(70, t, 0.12, 'sine', 0.35, 45);
+        if (b === 3 || b === 6) for (const n of ch) tone(hz(root * 4, n), t, st * 0.7, 'square', 0.035); // brass stab
+        if (bar === 3 && b === 7) for (const n of [7, 11, 14, 17]) tone(hz(root * 4, n), t, st * 0.9, 'sawtooth', 0.03);
+      });
+    },
+    // Guessing time: a ticking clock and a nervous minor ostinato that speeds up in the last seconds
+    think() {
+      const root = 220, arp = [0, 3, 7, 3, 8, 3, 7, 3, 0, 3, 7, 10, 8, 7, 3, 2];
+      runSeq(() => 60 / (100 + urgency * 50) / 4, (step, t) => {
+        const b = step % 16, st = 60 / (100 + urgency * 50) / 4;
+        if (b % 4 === 0) tone(b % 8 ? 1500 : 1900, t, 0.035, 'sine', 0.13); // tick… tock
+        if (urgency && b % 2 === 0 && b % 4) tone(2400, t, 0.02, 'sine', 0.06);
+        tone(hz(root * (urgency ? 2 : 1), arp[b]), t, st * 0.8, 'triangle', 0.07); // pizzicato
+        if (b === 0) tone(hz(root / 4, (step >> 4) % 2 ? 1 : 0), t, st * 14, 'sine', 0.2); // low pulse, creeping up a semitone
+        if (b === 8 && urgency) noise(t, st * 6, 300, 3000, 0.08); // rising whoosh
+      });
+    },
+  };
+
   function srcFor(file) { return '/music/' + file.split('/').map(encodeURIComponent).join('/'); }
   function prep(file) { // preload during the round intro so the music starts on cue
     if (!file) return;
     const s = srcFor(file);
     if (!music.src.endsWith(s)) { music.src = s; music.load(); }
   }
-  function play(file, elapsedMs, rate = 1) {
-    const my = ++gen; stopBand(); music.pause();
-    if (!file) return startBand(rate);
+  function stopBed() { bed = { kind: null, file: null }; wantBed = null; bgm.pause(); if (seq && seq.bed) stopSeq(); }
+  function startBed(kind, file, force) {
+    if (!force && bed.kind === kind && bed.file === (file || null)) return; // already playing: keep going without a restart
+    gen++; music.pause(); stopSeq(); bgm.pause();
+    bed = { kind, file: file || null };
+    if (!ac) { wantBed = { kind, file }; return; }
+    if (file) {
+      const s = srcFor(file);
+      if (!bgm.src.endsWith(s)) { bgm.src = s; } else bgm.currentTime = 0;
+      bgm.volume = vol;
+      bgm.play().catch(() => { if (bed.file === file) { TRACKS[kind](); seq && (seq.bed = true); } });
+    } else { TRACKS[kind](); if (seq) seq.bed = true; }
+  }
+  function play(file, elapsedMs, rate = 1) { // the round music
+    const my = ++gen; stopBed(); stopSeq(); music.pause();
+    if (!file) { TRACKS.band(rate); return; }
     prep(file);
     const begin = () => {
       if (my !== gen) return;
@@ -412,18 +562,18 @@ const Snd = (() => {
       try { music.currentTime = off + (elapsedMs / 1000) * rate; } catch {}
       music.playbackRate = rate; music.defaultPlaybackRate = rate;
       music.volume = vol;
-      music.play().catch(() => { if (my === gen) startBand(rate); });
+      music.play().catch(() => { if (my === gen) TRACKS.band(rate); });
     };
-    music.onerror = () => { if (my === gen) startBand(rate); };
+    music.onerror = () => { if (my === gen) TRACKS.band(rate); };
     if (music.readyState >= 1) begin(); else music.addEventListener('loadedmetadata', begin, { once: true });
   }
   function stop(scratch) {
-    const was = !music.paused || bandTimer; gen++;
-    music.pause(); stopBand();
+    const was = !music.paused || !bgm.paused || seq;
+    gen++; music.pause(); stopSeq(); stopBed();
     if (scratch && was) sfx('scratch');
   }
-  function setVol(v) { vol = v; music.volume = v; if (master) master.gain.value = v; LS.set('sitshow.vol', Math.round(v * 100)); }
-  return { unlock, sfx, play, prep, stop, setVol, get vol() { return vol; } };
+  function setVol(v) { vol = v; music.volume = v; bgm.volume = v; if (master) master.gain.value = v; LS.set('sitshow.vol', Math.round(v * 100)); }
+  return { unlock, sfx, play, prep, stop, bed: startBed, stopBed, setVol, setUrgency(u) { urgency = u ? 1 : 0; }, get vol() { return vol; }, get bedKind() { return bed.kind; } };
 })();
 addEventListener('pointerdown', Snd.unlock, { capture: true });
 addEventListener('keydown', Snd.unlock, { capture: true });
@@ -435,6 +585,12 @@ function roundSong(r) { // streamer mode swaps the host's pick for a stream-safe
   const pool = S.music.streamSafe;
   return pool.length ? pool[strHash(r.code + ':' + r.round) % pool.length] : null;
 }
+function bedFile(r, kind) { // optional MP3s from the Intro Music / Thinking Music folders (never in streamer mode)
+  const pool = kind === 'vamp' ? S.music.intro : S.music.thinking;
+  if (S.streamer || !pool || !pool.length) return null;
+  return pool[strHash(r.code + ':' + kind + (kind === 'think' ? r.round : '')) % pool.length]; // one intro track per show, a new thinking track each round
+}
+function preRoundBed(r) { Snd.bed('vamp', bedFile(r, 'vamp')); }
 const musicLine = (r) => (S.streamer ? '🎥 ' : '♪ ') + songTitle(roundSong(r)) + (r.settings.speed ? ' (+10%)' : '') + ' — keep moving!';
 function startMusic(r) { Snd.play(roundSong(r), r.elapsed + (performance.now() - r.at), r.settings.speed ? 1.1 : 1); }
 
@@ -456,15 +612,15 @@ function onPhase(r, prev) {
   $('puzzle').classList.remove('locked', 'shake');
   switch (r.phase) {
     case 'lobby':
-      Snd.stop(); confetti.length = 0;
+      confetti.length = 0; preRoundBed(r);
       banner('', r.players.length < 2 ? 'Waiting for contestants — share the invite link!' : 'Waiting for the host to start the show…');
       break;
     case 'ready':
-      Snd.stop();
+      preRoundBed(r);
       banner(`UP NEXT: ROUND ${r.round + 1}`, r.hostId === S.me.id ? 'Start the round when everyone\'s ready' : 'Waiting for the host to start the round…', 'teal');
       break;
     case 'intro':
-      Snd.stop(); Snd.prep(roundSong(r)); Snd.sfx('drum');
+      preRoundBed(r); Snd.prep(roundSong(r)); Snd.sfx('drum');
       banner(alive.length === 2 ? 'THE FINAL!' : 'ROUND ' + r.round, `${alive.length} contestants · ${r.chairs.length} chair${r.chairs.length > 1 ? 's' : ''}`);
       break;
     case 'music':
@@ -472,11 +628,13 @@ function onPhase(r, prev) {
       banner('', musicLine(r));
       break;
     case 'scramble':
-      Snd.stop(true);
+      Snd.stop(true); Snd.setUrgency(false);
+      setTimeout(() => { if (S.room && S.room.phase === 'scramble') Snd.bed('think', bedFile(S.room, 'think')); }, 450);
       banner('GRAB A SEAT!', '', 'red');
       break;
     case 'results': {
       Snd.stop();
+      setTimeout(() => { if (S.room && /results|ready|intro/.test(S.room.phase)) preRoundBed(S.room); }, r.out.length ? 1700 : 300);
       if (r.nobody) { banner('NOBODY SAT DOWN!', "Let's try that again…", 'teal'); break; }
       const now = performance.now();
       for (const id of r.out) { const e = ents.get(id); if (e) { e.deathAt = now; e.deathKind = r.byId.get(id)?.death || 'poof'; } }
@@ -486,6 +644,7 @@ function onPhase(r, prev) {
     }
     case 'gameover':
       Snd.stop(); Snd.sfx('fanfare');
+      setTimeout(() => { if (S.room && /gameover|lobby/.test(S.room.phase)) preRoundBed(S.room); }, 2400);
       banner(r.winner ? `🏆 ${nameOf(r, r.winner)} WINS!` : 'NOBODY WINS!', (r.standings || []).slice(1, 3).map((s, i) => `${i + 2}. ${s.name}`).join('  ·  '));
       spawnConfetti();
       break;
@@ -521,7 +680,7 @@ function renderPlayers(r) {
     const av = el('span', { class: 'avatar' }); setAvatarEl(av, p, p.id === S.me.id ? LS.get('sitshow.avatar') : null);
     const canKick = amHost && p.id !== S.me.id && p.id !== r.ownerId;
     ul.append(el('li', { class: (p.id === S.me.id ? 'me ' : '') + (playing && p.inGame && !p.alive ? 'out ' : '') + (p.away ? 'away' : ''), title: p.away ? 'Reconnecting…' : '' },
-      av, el('span', { class: 'pn', text: (p.id === r.hostId ? '👑 ' : '') + p.name }),
+      av, el('span', { class: 'pn', text: (p.id === r.hostId ? '👑 ' : '') + p.name }, p.acct && el('span', { class: 'acct-tick', title: 'Registered account', text: '✓' })),
       el('span', { class: 'lv', text: 'Lv ' + p.level }), el('span', { text: status }),
       canKick && el('button', { class: 'kick', title: `Remove ${p.name} from the show`, text: '✕', onclick: () => { if (p.bot || confirm(`Remove ${p.name} from the show? They won't be able to rejoin.`)) send({ t: 'kick', id: p.id }); } })));
   }
@@ -1245,6 +1404,7 @@ function frame(now) {
   if (r.phase === 'scramble') {
     const left = Math.max(0, Math.ceil((r.remain - (now - r.at)) / 1000));
     tm.hidden = false; tm.textContent = left; tm.classList.toggle('low', left <= 5);
+    Snd.setUrgency(left <= 5);
   } else tm.hidden = true;
 
   const idle = r.phase === 'lobby' || r.phase === 'gameover' || r.phase === 'ready';

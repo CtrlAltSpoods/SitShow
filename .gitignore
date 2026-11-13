@@ -1,3 +1,4 @@
-data/profiles.json
-data/music/*.mp3
+data/profiles.json*
+data/sitshow.db*
+data/music/**/*.mp3
 node_modules

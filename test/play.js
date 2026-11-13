@@ -1,4 +1,5 @@
 // Scripted playthrough against a running server: BASE=localhost:3000 node test/play.js
+// (optional RECONNECT_GRACE_MS=<same as server> also checks that abandoned rooms close)
 // Covers rooms, passwords, host settings, music categories, manual rounds, every challenge type
 // the bot can solve, host hand-back after a dropped connection, kicking, and the avatar API.
 const BASE = process.env.BASE || 'localhost:3000';
@@ -165,9 +166,12 @@ function autoplay(c, stats) {
   console.log('kick ok');
 
   H.ws.close(); B.ws.close();
-  await sleep(4500);
-  const h = await (await fetch(`http://${BASE}/api/health`)).json();
-  assert.equal(h.rooms, 0, 'room cleaned up after reconnect grace');
+  const grace = +process.env.RECONNECT_GRACE_MS || 0; // set it to match the server to check room clean-up
+  if (grace) {
+    await sleep(grace + 500);
+    const h = await (await fetch(`http://${BASE}/api/health`)).json();
+    assert.equal(h.rooms, 0, 'room cleaned up after reconnect grace');
+  }
   console.log('ALL OK');
   process.exit(0);
 })().catch((e) => { console.error('FAIL', e); process.exit(1); });

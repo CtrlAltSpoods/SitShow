@@ -46,6 +46,8 @@
       </div>
       <p class="hint">Streamer mode plays only stream-safe music on your screen and hides room codes.</p>
 
+      <div class="acct" id="acctBox"></div>
+
       <div class="wardrobe home-wardrobe">
         <div class="wardrobe-preview">
           <canvas class="preview-canvas" width="200" height="236"></canvas>
@@ -107,6 +109,7 @@
       </div>
       <label class="field" id="invPwField" hidden><span>🔒 Show password</span><input id="invPw" type="password" maxlength="64" autocomplete="off"></label>
       <p class="hint err" id="invErr" hidden></p>
+      <button type="button" class="btn ghost small" id="invSignin" hidden>🔑 I have an account — sign in with my passkey</button>
       <label class="switch"><input type="checkbox" data-streamer><span></span> 🎥 Streamer mode</label>
       <button class="btn primary wide" type="submit">Take your seat</button>
       <button class="btn ghost small" type="button" id="invBack">Not now — go to the lobby</button>

@@ -15,7 +15,7 @@ docker run -d --name sitshow -p 3000:3000 -v ./data:/data ghcr.io/ctrlaltspoods/
 ```
 
 Or build it yourself with `docker compose up -d --build`, or run it without Docker
-(Node 18+, no dependencies to install): `node server.js`.
+(Node 22.13+, no dependencies to install): `npm start`.
 
 ### Unraid
 
@@ -44,11 +44,18 @@ then a specific song or **Random song each round**. Press ↻ to rescan — no r
 
 ```
 music/
-├── Dubstep/        → category "Dubstep"
-├── 80s/            → category "80s"
-├── Stream Safe/    → used by streamer mode (also a normal category)
-└── loose.mp3       → category "Unsorted"
+├── Dubstep/          → category "Dubstep"
+├── 80s/              → category "80s"
+├── Stream Safe/      → used by streamer mode (also a normal category)
+├── Intro Music/      → optional: plays in the lobby and before each round
+├── Thinking Music/   → optional: plays while players grab seats
+└── loose.mp3         → category "Unsorted"
 ```
+
+There's never dead air: between rounds a built-in game-show vamp plays, and while players
+are solving a built-in ticking "thinking" loop plays (it speeds up in the last 5 seconds).
+Put tracks in `Intro Music` / `Thinking Music` to use your own instead — those two folders
+aren't offered as round-music categories, and streamer mode always uses the built-in ones.
 
 Each round the track starts **30 seconds in** and plays for a random time inside the
 host's range (default **7–30 seconds**; the server keeps the stop time secret). The
@@ -58,6 +65,27 @@ late as they can. With no MP3s at all, a built-in synth "House Band" plays.
 **Streamer mode** (🎥, per player) ignores the host's song and plays a track from a
 folder called `Stream Safe` instead — everyone in streamer mode hears the same one — or
 the House Band if that folder doesn't exist. It also hides the room code on screen.
+
+## Accounts (passkeys)
+
+Everyone starts as a guest. In the profile panel, **Create account** makes a passkey
+(Face ID, Touch ID, Windows Hello, a phone or a password manager) — there's no password.
+An account:
+
+- keeps your level, unlocks and name on any device — **Sign in** with the passkey there
+- has a permanent **ID** (shown in the profile panel); your display name can change
+- **reserves your name**: nobody else can use it, ignoring case, spaces and punctuation
+  ("Jake", "JAKE" and "j.a.k.e" are the same name). Renaming moves the reservation.
+- can have more than one passkey (**Add a passkey**) and can **Sign out**
+
+Account holders get a ✓ next to their name in the player list.
+
+**Passkeys only work over HTTPS with a domain name** (or on `localhost`). Browsers block
+them on `http://` addresses and on IP addresses like `http://192.168.1.10:3000`. Put Sit
+Show behind a reverse proxy (Nginx Proxy Manager, SWAG, Caddy, a Cloudflare Tunnel…) at
+something like `https://sitshow.example.com`, with WebSockets enabled. Everything else
+works without HTTPS; the account buttons just explain why they're unavailable.
+If your proxy rewrites the `Host` header, set `PUBLIC_ORIGIN=https://sitshow.example.com`.
 
 ## Hosting a show
 
@@ -111,17 +139,27 @@ games. A wrong answer (or jumping the gun on the reaction game) freezes you for 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `3000` | HTTP/WebSocket port |
-| `DATA_DIR` | `./data` (`/data` in Docker) | Holds `music/` and `profiles.json` (levels) |
+| `DATA_DIR` | `./data` (`/data` in Docker) | Holds `music/` and `sitshow.db` (players, accounts, passkeys) |
 | `MUSIC_DIR` | `$DATA_DIR/music` | Where MP3s are read from |
+| `PUBLIC_ORIGIN` | *(derived from the request)* | Your HTTPS address(es) for passkeys, comma-separated, e.g. `https://sitshow.example.com` |
+| `RP_ID` | *(the domain of the address)* | Passkey domain — set it to a parent domain to share passkeys across sub-domains |
 | `AVATAR_GRACE_MS` | `300000` | How long an avatar is kept after disconnect |
 | `RECONNECT_GRACE_MS` | `60000` | How long a dropped player keeps their spot |
 | `PUID` / `PGID` | `99` / `100` (Docker) | User and group the server runs as |
 
-Progress is tied to a random ID stored in each player's browser; there are no accounts.
+Players, sessions and passkeys (public keys only) live in `data/sitshow.db`, a SQLite file
+(Node's built-in `node:sqlite`, so still no dependencies; needs Node 22.13+). Back it up by
+copying it while the container is stopped. An old `profiles.json` is imported automatically
+on first start and renamed to `profiles.json.migrated`; each player's progress moves over
+the next time their browser connects. Guests keep their progress via a random token in
+their browser.
 Behind a reverse proxy, forward WebSocket upgrades for `/ws`.
 In Docker the server starts as root only to fix ownership of `/data`, then runs as
 `PUID`:`PGID` (default `99`:`100`).
 
 ## Test
+
+`BASE=localhost:3000 node test/accounts.js` exercises accounts with a software passkey
+(server on `localhost`).
 
 `BASE=localhost:3000 node test/play.js` runs a scripted two-player + bots game against a running server (Node 22+). It expects a `Dubstep` folder with at least one MP3 in the music folder.

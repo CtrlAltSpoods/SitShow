@@ -177,6 +177,15 @@ select option { color: #111; }
 .item small { font-family: var(--display); font-size: .6rem; background: rgba(0,0,0,.4); color: var(--cream); border-radius: 6px; padding: 1px 5px; }
 .item.emo { font-size: 1.2rem; padding: 2px 7px; cursor: default; }
 
+/* account panel */
+.acct { margin-top: 12px; padding: 12px; border-radius: 12px; background: rgba(0,0,0,.25); border: 1px solid rgba(255,200,61,.25); display: grid; gap: 8px; }
+.acct-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-weight: 700; }
+.acct-badge { background: var(--teal); color: var(--ink); font-family: var(--display); font-size: .7rem; padding: 2px 8px; border-radius: 99px; }
+.acct-badge.guest { background: rgba(255,255,255,.18); color: var(--cream); }
+.acct-id { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .8rem; background: rgba(0,0,0,.35); border: 0; color: var(--cream); padding: 2px 7px; border-radius: 6px; cursor: pointer; }
+.acct .hint { margin: 0; }
+.players .acct-tick { color: var(--teal); font-size: .75rem; margin-left: 3px; }
+
 /* invite landing */
 #invite { min-height: 100dvh; display: grid; place-items: center; padding: 20px; }
 .invite-card { width: min(460px, 100%); text-align: center; box-shadow: 0 0 0 4px var(--gold), 0 20px 60px #000; }
