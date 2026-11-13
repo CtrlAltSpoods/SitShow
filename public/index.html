@@ -5,14 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Sit Show — Musical Chairs Royale</title>
 <meta name="description" content="Sit Show: the musical chairs game show. When the music stops, solve a puzzle to grab a seat.">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🪑%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="/icon.png">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<div class="curtain" aria-hidden="true"></div>
+<div class="curtain" aria-hidden="true"><i class="sway"></i><i class="beams"></i><i class="dust"></i></div>
 
 <!-- ═════════════ HOME ═════════════ -->
-<main id="home" class="screen">
+<main id="home" class="screen" hidden>
   <header class="marquee">
     <div class="bulbs" aria-hidden="true"></div>
     <p class="marquee-top">Live from Studio 5 · it's</p>
@@ -21,11 +21,11 @@
   </header>
 
   <div class="home-grid">
-    <section class="card" aria-labelledby="h-you">
+    <section class="card profile-card" aria-labelledby="h-you">
       <h2 id="h-you">Tonight's contestant</h2>
       <div class="profile">
-        <button class="avatar-btn" id="avatarBtn" title="Upload an avatar">
-          <span id="homeAvatar" class="avatar big"></span>
+        <button class="avatar-btn" data-avatar-upload title="Upload a profile picture">
+          <span class="avatar big" data-my-avatar></span>
           <span class="avatar-edit">📷</span>
         </button>
         <div class="profile-info">
@@ -34,47 +34,84 @@
             <input id="homeName" maxlength="16" autocomplete="nickname" spellcheck="false">
           </label>
           <div class="level-row">
-            <span class="lv-badge" id="homeLevel">Lv 1</span>
-            <div class="xpbar"><i id="homeXpFill"></i></div>
+            <span class="lv-badge" data-my-level>Lv 1</span>
+            <div class="xpbar"><i data-my-xp></i></div>
             <span class="xp-text" id="homeXpText"></span>
           </div>
         </div>
       </div>
       <div class="row">
-        <button class="btn ghost" id="homeWardrobe">🎭 Wardrobe</button>
-        <button class="btn ghost" id="avatarRemove" hidden>Remove photo</button>
+        <label class="switch"><input type="checkbox" data-streamer><span></span> 🎥 Streamer mode</label>
+        <button class="btn small ghost" data-avatar-remove hidden>Remove photo</button>
+      </div>
+      <p class="hint">Streamer mode plays only stream-safe music on your screen and hides room codes.</p>
+
+      <div class="wardrobe home-wardrobe">
+        <div class="wardrobe-preview">
+          <canvas class="preview-canvas" width="200" height="236"></canvas>
+          <p class="hint preview-hint">Click anything to preview it — even the locked stuff.</p>
+        </div>
+        <div class="wardrobe-lists"></div>
       </div>
     </section>
 
-    <section class="card" aria-labelledby="h-create">
-      <h2 id="h-create">Host a show</h2>
-      <form id="createForm">
-        <label class="field"><span>Show name</span><input id="createName" maxlength="28" placeholder="Friday Night Sit-Down"></label>
-        <div class="seg" role="radiogroup" aria-label="Visibility">
-          <label><input type="radio" name="vis" value="public" checked><span>📺 Public</span></label>
-          <label><input type="radio" name="vis" value="private"><span>🔒 Private</span></label>
-        </div>
-        <p class="hint" id="visHint">Public shows are listed for everyone.</p>
-        <div class="two">
-          <label class="field"><span>Password (optional)</span><input id="createPw" type="password" maxlength="64" autocomplete="new-password"></label>
-          <label class="field"><span>Seats in the studio</span>
-            <select id="createMax"><option>4</option><option>6</option><option selected>8</option><option>10</option><option>12</option></select>
-          </label>
-        </div>
-        <button class="btn primary wide" type="submit">Go live</button>
-      </form>
-    </section>
+    <div class="home-col">
+      <section class="card" aria-labelledby="h-create">
+        <h2 id="h-create">Host a show</h2>
+        <form id="createForm">
+          <label class="field"><span>Show name</span><input id="createName" maxlength="28" placeholder="Friday Night Sit-Down"></label>
+          <div class="seg" role="radiogroup" aria-label="Visibility">
+            <label><input type="radio" name="vis" value="public" checked><span>📺 Public</span></label>
+            <label><input type="radio" name="vis" value="private"><span>🔒 Private</span></label>
+          </div>
+          <p class="hint" id="visHint">Public shows are listed for everyone.</p>
+          <div class="two">
+            <label class="field"><span>Password (optional)</span><input id="createPw" type="password" maxlength="64" autocomplete="new-password"></label>
+            <label class="field"><span>Seats in the studio</span>
+              <select id="createMax"><option>4</option><option>6</option><option selected>8</option><option>10</option><option>12</option></select>
+            </label>
+          </div>
+          <button class="btn primary wide" type="submit">Go live</button>
+        </form>
+      </section>
 
-    <section class="card rooms-card" aria-labelledby="h-rooms">
-      <h2 id="h-rooms">Now showing</h2>
-      <div id="roomList" class="room-list"></div>
-      <form id="codeForm" class="row code-row">
-        <input id="codeInput" maxlength="6" placeholder="Invite code" spellcheck="false" autocapitalize="characters" aria-label="Invite code">
-        <button class="btn" type="submit">Join</button>
-      </form>
-    </section>
+      <section class="card rooms-card" aria-labelledby="h-rooms">
+        <h2 id="h-rooms">Now showing</h2>
+        <div id="roomList" class="room-list"></div>
+        <form id="codeForm" class="row code-row">
+          <input id="codeInput" maxlength="6" placeholder="Invite code" spellcheck="false" autocapitalize="characters" aria-label="Invite code">
+          <button class="btn" type="submit">Join</button>
+        </form>
+      </section>
+    </div>
   </div>
-  <footer class="home-foot">Solve a chair's puzzle first to claim it · Level up to unlock dances, emotes and dramatic exits</footer>
+  <footer class="home-foot">Solve a chair's challenge first to claim it · Level up to unlock dances, emotes and dramatic exits</footer>
+</main>
+
+<!-- ═════════════ INVITE ═════════════ -->
+<main id="invite" class="screen" hidden>
+  <div class="invite-card card">
+    <p class="marquee-top">You're invited to</p>
+    <h1 class="invite-title" id="invName"></h1>
+    <p class="invite-meta" id="invMeta"></p>
+    <form id="inviteForm" class="invite-form">
+      <div class="profile">
+        <button type="button" class="avatar-btn" data-avatar-upload title="Upload a profile picture">
+          <span class="avatar big" data-my-avatar></span>
+          <span class="avatar-edit">📷</span>
+        </button>
+        <div class="profile-info">
+          <label class="field"><span>Your stage name</span><input id="invNameInput" maxlength="16" autocomplete="nickname" spellcheck="false" required></label>
+          <p class="hint">Tap the circle to add a profile picture.</p>
+        </div>
+      </div>
+      <label class="field" id="invPwField" hidden><span>🔒 Show password</span><input id="invPw" type="password" maxlength="64" autocomplete="off"></label>
+      <p class="hint err" id="invErr" hidden></p>
+      <label class="switch"><input type="checkbox" data-streamer><span></span> 🎥 Streamer mode</label>
+      <button class="btn primary wide" type="submit">Take your seat</button>
+      <button class="btn ghost small" type="button" id="invBack">Not now — go to the lobby</button>
+    </form>
+  </div>
 </main>
 
 <!-- ═════════════ ROOM ═════════════ -->
@@ -89,7 +126,8 @@
     <div class="top-actions">
       <button class="btn small" id="inviteBtn">🔗 Copy invite</button>
       <button class="btn small ghost" id="invitePwBtn" hidden title="Copies a link that includes the password">🔗 + password</button>
-      <label class="vol" title="Volume">🔊<input id="volume" type="range" min="0" max="100" value="70" aria-label="Volume"></label>
+      <label class="switch compact" title="Streamer mode: stream-safe music and hidden room codes"><input type="checkbox" data-streamer><span></span> 🎥</label>
+      <label class="vol" title="Volume">🔊<input id="volume" type="range" min="0" max="100" value="10" aria-label="Volume"></label>
       <button class="btn small ghost" id="leaveBtn">Leave</button>
     </div>
   </header>
@@ -100,6 +138,7 @@
       <div class="letterbox top" aria-hidden="true"></div>
       <div class="letterbox bottom" aria-hidden="true"></div>
       <div class="banner" id="banner" aria-live="polite"><div class="banner-main" id="bannerMain"></div><div class="banner-sub" id="bannerSub"></div></div>
+      <button class="btn gold stage-btn" id="stageBtn" hidden></button>
       <div class="timer" id="timer" hidden></div>
       <div class="puzzle" id="puzzle" hidden></div>
       <div class="emote-bar" id="emoteBar"></div>
@@ -107,12 +146,14 @@
 
     <aside class="side">
       <div class="side-me">
-        <span id="sideAvatar" class="avatar"></span>
+        <button class="avatar-btn small" data-avatar-upload title="Change your profile picture">
+          <span class="avatar" data-my-avatar></span><span class="avatar-edit">📷</span>
+        </button>
         <div class="side-me-info">
           <button class="name-btn" id="nameBtn" title="Change your name"><span id="sideName"></span> ✏️</button>
           <div class="level-row">
-            <span class="lv-badge" id="sideLevel">Lv 1</span>
-            <div class="xpbar"><i id="sideXpFill"></i></div>
+            <span class="lv-badge" data-my-level>Lv 1</span>
+            <div class="xpbar"><i data-my-xp></i></div>
           </div>
         </div>
         <button class="btn small ghost" id="wardrobeBtn" title="Wardrobe">🎭</button>
@@ -122,7 +163,7 @@
 
       <h3 class="side-h">Contestants <span id="playerCount"></span></h3>
       <ul class="players" id="playerList"></ul>
-      <p class="hint keys">During a scramble: click a chair or press <kbd>Tab</kbd> to switch, <kbd>1</kbd>–<kbd>4</kbd> to pick an answer.</p>
+      <p class="hint keys">During a scramble: click a chair or press <kbd>Tab</kbd> to switch, <kbd>1</kbd>–<kbd>4</kbd> to answer, <kbd>Space</kbd> for tap games.</p>
     </aside>
   </div>
 </main>
@@ -150,10 +191,10 @@
     <div class="row between"><h2>🎭 Wardrobe</h2><button class="btn small ghost" data-close>Close</button></div>
     <div class="wardrobe">
       <div class="wardrobe-preview">
-        <canvas id="previewCanvas" width="260" height="300"></canvas>
-        <p class="hint" id="previewHint">Click anything to preview it — even the locked stuff.</p>
+        <canvas class="preview-canvas" width="260" height="300"></canvas>
+        <p class="hint preview-hint">Click anything to preview it — even the locked stuff.</p>
       </div>
-      <div class="wardrobe-lists" id="wardrobeLists"></div>
+      <div class="wardrobe-lists"></div>
     </div>
   </div>
 </div>
@@ -161,6 +202,7 @@
 <input type="file" id="avatarFile" accept="image/*" hidden>
 <div class="toasts" id="toasts" aria-live="polite"></div>
 <div class="reconnect" id="reconnect" hidden><div>📡 Lost the signal — reconnecting…</div></div>
+<div class="reconnect" id="replaced" hidden><div>📺 Sit Show is open somewhere else.<br><button class="btn gold" onclick="location.reload()">Play here instead</button></div></div>
 
 <script src="/client.js"></script>
 </body>

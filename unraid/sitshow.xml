@@ -7,7 +7,7 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/CtrlAltSpoods/SitShow/issues</Support>
   <Project>https://github.com/CtrlAltSpoods/SitShow</Project>
-  <Overview>Sit Show - Musical Chairs Royale. A multiplayer browser game show: avatars circle the chairs while the music plays, and when it stops each chair goes to whoever solves its mini-puzzle first. Put MP3s in the music folder for the host's song picker.</Overview>
+  <Overview>Sit Show - Musical Chairs Royale. A multiplayer browser game show: avatars circle the chairs while the music plays, and when it stops each chair goes to whoever solves its challenge first. Put MP3s in the music folder; each sub-folder becomes a category, and a "Stream Safe" folder feeds streamer mode.</Overview>
   <Category>GameServers:</Category>
   <WebUI>http://[IP]:[PORT:3000]/</WebUI>
   <Icon>https://raw.githubusercontent.com/CtrlAltSpoods/SitShow/main/public/icon.png</Icon>

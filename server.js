@@ -8,6 +8,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { GROUPS, makePuzzles } = require('./puzzles');
 
 const PORT = +process.env.PORT || 3000;
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
@@ -16,17 +17,16 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const PROFILE_FILE = path.join(DATA_DIR, 'profiles.json');
 
 const AVATAR_GRACE_MS = +process.env.AVATAR_GRACE_MS || 5 * 60 * 1000; // avatars survive 5 minutes after disconnect
+const RECONNECT_GRACE_MS = +process.env.RECONNECT_GRACE_MS || 60 * 1000; // a dropped player keeps their spot this long
 const AVATAR_MAX_BYTES = 200 * 1024;
 const WS_MAX_PAYLOAD = 16 * 1024;
 const MAX_ROOMS = 200;
 
 const T_INTRO = 3500;
-const T_MUSIC_MIN = 7000;
-const T_MUSIC_MAX = 30000;
-const T_SCRAMBLE = 25000;
 const T_RESULTS = 5200;
 const T_GAMEOVER = 10000;
 const WRONG_LOCK = 2000;
+const MASH_GAP = 50; // ms between counted taps
 
 // When started as root (Docker/Unraid), fix ownership of the data folder and drop to PUID/PGID
 // (Unraid's convention is 99:100 = nobody:users), so host-mounted appdata just works.
@@ -40,7 +40,7 @@ if (typeof process.getuid === 'function' && process.getuid() === 0 && process.en
   try { process.setgid(gid); process.setuid(uid); console.log(`Running as ${uid}:${gid}`); }
   catch (e) { console.warn('Could not drop privileges:', e.message); }
 }
-try { fs.mkdirSync(MUSIC_DIR, { recursive: true }); } catch (e) { console.warn('Could not create music dir:', e.message); }
+try { fs.mkdirSync(MUSIC_DIR, { recursive: true }); } catch {}
 
 // ───────────────────────────── catalog (unlockables) ─────────────────────────────
 const CATALOG = {
@@ -90,11 +90,7 @@ const catalogItem = (kind, id) => CATALOG[kind].find((x) => x.id === id);
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 const rnd = (n) => Math.floor(Math.random() * n);
 const pick = (arr) => arr[rnd(arr.length)];
-function shuffle(arr) {
-  const a = arr.slice();
-  for (let i = a.length - 1; i > 0; i--) { const j = rnd(i + 1); [a[i], a[j]] = [a[j], a[i]]; }
-  return a;
-}
+const clampInt = (v, a, b, d) => { const n = Math.round(Number(v)); return Number.isFinite(n) ? Math.min(b, Math.max(a, n)) : d; };
 function cleanText(v, max) {
   const s = String(v == null ? '' : v).replace(/[\u0000-\u001f\u007f<>]/g, '').replace(/\s+/g, ' ').trim();
   return [...s].slice(0, max).join('');
@@ -124,18 +120,40 @@ function flushProfiles() { try { fs.writeFileSync(PROFILE_FILE, JSON.stringify(p
 process.on('SIGTERM', () => { flushProfiles(); process.exit(0); });
 process.on('SIGINT', () => { flushProfiles(); process.exit(0); });
 
-// ───────────────────────────── music ─────────────────────────────
+// ───────────────────────────── music (folders = categories) ─────────────────────────────
+const STREAM_SAFE_RE = /^stream[\s_-]*safe$/i;
 let songCache = { at: 0, list: [] };
 function listSongs() {
   if (Date.now() - songCache.at < 3000) return songCache.list;
-  let list = [];
-  try {
-    list = fs.readdirSync(MUSIC_DIR, { withFileTypes: true })
-      .filter((d) => d.isFile() && /\.mp3$/i.test(d.name) && !d.name.startsWith('.'))
-      .map((d) => d.name).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-  } catch {}
-  songCache = { at: Date.now(), list };
-  return list;
+  const out = [];
+  const walk = (dir, rel, depth) => {
+    let ents;
+    try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const d of ents) {
+      if (out.length >= 5000) return;
+      if (d.name.startsWith('.') || d.name.startsWith('@')) continue; // hidden, Synology @eaDir etc.
+      const r = rel ? rel + '/' + d.name : d.name;
+      let isDir = d.isDirectory(), isFile = d.isFile();
+      if (d.isSymbolicLink()) { try { const st = fs.statSync(path.join(dir, d.name)); isDir = st.isDirectory(); isFile = st.isFile(); } catch { continue; } }
+      if (isDir) { if (depth < 4) walk(path.join(dir, d.name), r, depth + 1); }
+      else if (isFile && /\.mp3$/i.test(d.name)) out.push(r);
+    }
+  };
+  walk(MUSIC_DIR, '', 0);
+  out.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true }));
+  songCache = { at: Date.now(), list: out };
+  return out;
+}
+const songCat = (s) => (s.includes('/') ? s.slice(0, s.indexOf('/')) : '');
+function musicInfo() {
+  const songs = listSongs();
+  const counts = new Map();
+  for (const s of songs) counts.set(songCat(s), (counts.get(songCat(s)) || 0) + 1);
+  return {
+    songs,
+    cats: [...counts].map(([name, n]) => ({ name, n })).sort((a, b) => a.name.localeCompare(b.name)),
+    streamSafe: songs.filter((s) => STREAM_SAFE_RE.test(songCat(s))),
+  };
 }
 
 // ───────────────────────────── avatars (memory only, removed 5 min after disconnect) ─────────────────────────────
@@ -152,89 +170,9 @@ function scheduleAvatarRemoval(pid) {
   clearTimeout(av.timer);
   av.timer = setTimeout(() => { if (!byPid.has(pid)) avatars.delete(pid); }, AVATAR_GRACE_MS);
 }
+const normAnswer = (a) => String(a == null ? '' : a).trim().toLowerCase().replace(/\s+/g, '').slice(0, 80);
 
-// ───────────────────────────── puzzles ─────────────────────────────
-const WORDS = ['chair', 'music', 'dance', 'prize', 'lucky', 'buzzer', 'winner', 'encore', 'jingle', 'trophy', 'podium',
-  'wizard', 'banjo', 'disco', 'funky', 'groove', 'rhythm', 'tempo', 'cushion', 'velvet', 'glitter', 'jackpot', 'sparkle',
-  'wobble', 'giggle', 'panic', 'hurry', 'sofa', 'stool', 'bench', 'throne', 'rocket', 'zebra', 'pickle', 'waffle',
-  'noodle', 'muffin', 'banana', 'cactus', 'dragon', 'pirate', 'ninja', 'robot', 'yodel', 'kazoo', 'tuba', 'confetti'];
-const EMOJI_SETS = [
-  ['🍎', '🍌', '🍇', '🍓', '🍑', '🍍', '🥝', '🍒'],
-  ['🐶', '🐱', '🐸', '🐵', '🦊', '🐼', '🐷', '🐮'],
-  ['🚗', '🚕', '🚌', '🚲', '🚀', '🚂', '🛵', '🚁'],
-  ['⚽', '🏀', '🏈', '🎾', '🏐', '🎱', '🏓', '🥊'],
-  ['🍕', '🍔', '🌭', '🌮', '🍟', '🍩', '🥨', '🧀'],
-  ['🎸', '🎺', '🎻', '🥁', '🎹', '🎷', '🪗', '🪘'],
-];
-const INKS = [['RED', '#ff4d5e'], ['BLUE', '#4d8dff'], ['GREEN', '#3ddc84'], ['YELLOW', '#ffd93d'], ['PINK', '#ff7ad9'], ['ORANGE', '#ff9a3d']];
-
-const PUZZLES = [
-  function maths() {
-    const v = rnd(3);
-    let prompt, ans;
-    if (v === 0) { const a = 3 + rnd(9), b = 3 + rnd(9); prompt = `${a} × ${b}`; ans = a * b; }
-    else if (v === 1) { const a = 20 + rnd(60), b = 10 + rnd(40), c = 2 + rnd(18); prompt = `${a} + ${b} − ${c}`; ans = a + b - c; }
-    else { const a = 2 + rnd(8), b = 2 + rnd(8), c = 1 + rnd(20); prompt = `${a} × ${b} + ${c}`; ans = a * b + c; }
-    return { pub: { kind: 'type', numeric: true, title: 'Quick maths!', prompt: prompt + ' = ?' }, answer: String(ans) };
-  },
-  function unscramble() {
-    const w = pick(WORDS);
-    let s = w;
-    for (let i = 0; i < 10 && s === w; i++) s = shuffle([...w]).join('');
-    return { pub: { kind: 'type', title: 'Unscramble the word', prompt: s.toUpperCase().split('').join(' ') }, answer: w };
-  },
-  function sequence() {
-    const v = rnd(4);
-    let seq;
-    if (v === 0) { const a = 1 + rnd(20), d = 2 + rnd(9); seq = [0, 1, 2, 3, 4].map((i) => a + d * i); }
-    else if (v === 1) { const a = 1 + rnd(4), r = 2 + rnd(2); seq = [0, 1, 2, 3, 4].map((i) => a * r ** i); }
-    else if (v === 2) { const a = 1 + rnd(5); seq = [0, 1, 2, 3, 4].map((i) => (a + i) ** 2); }
-    else { const a = 1 + rnd(5), b = 1 + rnd(5); seq = [a, b]; while (seq.length < 5) seq.push(seq[seq.length - 1] + seq[seq.length - 2]); }
-    return { pub: { kind: 'type', numeric: true, title: 'What comes next?', prompt: seq.slice(0, 4).join(', ') + ', ?' }, answer: String(seq[4]) };
-  },
-  function oddOne() {
-    const [a, b] = shuffle(EMOJI_SETS);
-    const odd = pick(b);
-    return { pub: { kind: 'choice', title: 'Which one is the odd one out?', prompt: '', choices: shuffle([...shuffle(a).slice(0, 3), odd]), big: true }, answer: odd };
-  },
-  function count() {
-    const set = shuffle(pick(EMOJI_SETS));
-    const n = 3 + rnd(6);
-    const cells = Array(n).fill(set[0]);
-    const total = 13 + rnd(5);
-    while (cells.length < total) cells.push(set[1 + rnd(3)]);
-    const opts = new Set([n]);
-    while (opts.size < 4) { const o = n + rnd(5) - 2; if (o > 0) opts.add(o); }
-    return { pub: { kind: 'choice', title: `How many ${set[0]} ?`, prompt: shuffle(cells).join(' '), choices: shuffle([...opts]).map(String) }, answer: String(n) };
-  },
-  function stroop() {
-    const [word, ink, x, y] = shuffle(INKS);
-    return { pub: { kind: 'choice', title: 'What COLOUR is the ink? (not the word!)', prompt: word[0], ink: ink[1], choices: shuffle([word[0], ink[0], x[0], y[0]]) }, answer: ink[0] };
-  },
-  function biggest() {
-    const seen = new Set(); const items = [];
-    while (items.length < 4) {
-      const a = 2 + rnd(9), b = 2 + rnd(9), plus = rnd(2);
-      const val = plus ? a * 6 + b : a * b;
-      if (seen.has(val)) continue;
-      seen.add(val);
-      items.push({ label: plus ? `${a * 6} + ${b}` : `${a} × ${b}`, val });
-    }
-    const best = items.reduce((m, i) => (i.val > m.val ? i : m));
-    return { pub: { kind: 'choice', title: 'Which is the BIGGEST?', prompt: '', choices: items.map((i) => i.label) }, answer: best.label };
-  },
-  function backwards() {
-    const w = pick(WORDS.filter((x) => x.length <= 6));
-    return { pub: { kind: 'type', title: 'Type it backwards!', prompt: w.toUpperCase() }, answer: [...w].reverse().join('') };
-  },
-];
-function makePuzzles(n) {
-  const order = shuffle(PUZZLES);
-  return Array.from({ length: n }, (_, i) => order[i % order.length]());
-}
-const normAnswer = (a) => String(a == null ? '' : a).trim().toLowerCase().replace(/\s+/g, '').slice(0, 40);
-
-// ───────────────────────────── connections / rooms ─────────────────────────────
+// ───────────────────────────── rooms ─────────────────────────────
 const conns = new Set();
 const byPid = new Map();
 const rooms = new Map();
@@ -252,6 +190,30 @@ function newRoomCode() {
   }
 }
 function hashPw(pw, salt) { return crypto.scryptSync(pw, salt, 32); }
+const defaultSettings = () => ({
+  category: 'all', song: 'random', musicMin: 7, musicMax: 30, speed: false,
+  manual: false, scramble: 25, puzzles: Object.fromEntries(GROUPS.map((g) => [g.id, true])),
+});
+function applySettings(room, m) {
+  const s = room.settings;
+  if ('category' in m) {
+    const c = String(m.category);
+    if (c === 'all' || musicInfo().cats.some((x) => x.name === c)) { if (c !== s.category) s.song = 'random'; s.category = c; }
+  }
+  if ('song' in m) {
+    const v = String(m.song);
+    if (v === 'random' || (listSongs().includes(v) && (s.category === 'all' || songCat(v) === s.category))) s.song = v;
+  }
+  if ('musicMin' in m) { s.musicMin = clampInt(m.musicMin, 3, 90, s.musicMin); if (s.musicMax < s.musicMin) s.musicMax = s.musicMin; }
+  if ('musicMax' in m) { s.musicMax = clampInt(m.musicMax, 3, 90, s.musicMax); if (s.musicMin > s.musicMax) s.musicMin = s.musicMax; }
+  if ('speed' in m) s.speed = !!m.speed;
+  if ('manual' in m) s.manual = !!m.manual;
+  if ('scramble' in m) s.scramble = clampInt(m.scramble, 10, 60, s.scramble);
+  if (m.puzzles && typeof m.puzzles === 'object') {
+    for (const g of GROUPS) if (g.id in m.puzzles) s.puzzles[g.id] = !!m.puzzles[g.id];
+    if (!GROUPS.some((g) => s.puzzles[g.id])) s.puzzles.brain = true;
+  }
+}
 
 function meInfo(conn) {
   const p = conn.prof;
@@ -263,24 +225,28 @@ function meInfo(conn) {
     av: avatars.get(conn.pid)?.hash || null,
   };
 }
-function pubPlayer(room, p) {
+function pubPlayer(p) {
   const prof = p.prof;
   return {
     id: p.id, name: prof.name, level: p.bot ? p.level : levelForXp(prof.xp),
     av: p.bot ? null : avatars.get(p.id)?.hash || null, face: p.face || null,
     dance: prof.dance, death: prof.death, ring: prof.ring,
-    inGame: p.inGame, alive: p.alive, seat: p.seat, pick: p.pick, bot: !!p.bot,
+    inGame: p.inGame, alive: p.alive, seat: p.seat, pick: p.pick, bot: !!p.bot, away: !p.bot && !p.conn,
   };
 }
 function roomState(room) {
   const now = Date.now();
   return {
     t: 'room', code: room.code, name: room.name, vis: room.vis, locked: !!room.pw, max: room.max,
-    hostId: room.hostId, phase: room.phase, round: room.round, song: room.song, current: room.currentSong,
+    hostId: room.hostId, ownerId: room.ownerId, phase: room.phase, round: room.round, current: room.currentSong,
+    settings: room.settings,
     remain: room.phase !== 'music' && room.phaseEnds ? Math.max(0, room.phaseEnds - now) : 0,
     elapsed: room.phase === 'music' ? now - room.musicStart : 0,
-    chairs: room.chairs.map((c) => ({ owner: c.owner, puzzle: room.phase === 'scramble' && !c.owner ? c.pub : null })),
-    players: [...room.players.values()].map((p) => pubPlayer(room, p)),
+    chairs: room.chairs.map((c) => ({
+      owner: c.owner,
+      puzzle: room.phase === 'scramble' && !c.owner ? (c.kind === 'reaction' ? { ...c.pub, go: now >= c.goAt } : c.pub) : null,
+    })),
+    players: [...room.players.values()].map(pubPlayer),
     out: room.lastOut, nobody: room.nobody, winner: room.winner, standings: room.standings,
   };
 }
@@ -318,38 +284,50 @@ function setPhaseTimer(room, ms, fn) {
   room.phaseEnds = Date.now() + ms;
   room.timer = setTimeout(() => { if (!room.dead) fn(); }, ms);
 }
+function clearChairTimers(room) { for (const t of room.chairTimers) clearTimeout(t); room.chairTimers = []; }
 const alivePlayers = (room) => [...room.players.values()].filter((p) => p.inGame && p.alive);
 const humans = (room) => [...room.players.values()].filter((p) => !p.bot);
+function passHost(room) { // give control to someone who is actually connected
+  const next = humans(room).find((h) => h.conn) || humans(room)[0];
+  if (next) room.hostId = next.id;
+}
+function resetSeats(room) {
+  for (const p of room.players.values()) { p.seat = null; p.pick = null; p.lockUntil = 0; if (p.bot) clearTimeout(p.timer); }
+}
 
 function resetToLobby(room) {
-  clearTimeout(room.timer);
+  clearTimeout(room.timer); clearChairTimers(room);
   room.phase = 'lobby'; room.round = 0; room.chairs = []; room.currentSong = null; room.phaseEnds = 0;
   room.lastOut = []; room.nobody = false; room.winner = null; room.standings = null;
-  for (const p of room.players.values()) { p.inGame = false; p.alive = false; p.seat = null; p.pick = null; clearTimeout(p.timer); }
+  resetSeats(room);
+  for (const p of room.players.values()) { p.inGame = false; p.alive = false; }
   pushState(room); pushLobby();
 }
 function startGame(room) {
   if (room.phase !== 'lobby' || room.players.size < 2) return;
   room.outOrder = []; room.winner = null; room.standings = null; room.round = 0; room.lastSong = null;
-  for (const p of room.players.values()) { p.inGame = true; p.alive = true; p.seat = null; p.pick = null; p.seats = 0; p.lockUntil = 0; }
+  for (const p of room.players.values()) { p.inGame = true; p.alive = true; p.seats = 0; }
+  resetSeats(room);
   pushLobby();
-  nextRound(room);
+  beginRound(room);
 }
-function nextRound(room) {
+function pickSong(room) {
+  const s = room.settings, songs = listSongs();
+  const pool = s.category === 'all' ? songs : songs.filter((x) => songCat(x) === s.category);
+  if (s.song !== 'random' && pool.includes(s.song)) return s.song;
+  if (!pool.length) return null; // the client's built-in House Band plays instead
+  const fresh = pool.length > 1 ? pool.filter((x) => x !== room.lastSong) : pool;
+  return pick(fresh);
+}
+function beginRound(room) {
   const alive = alivePlayers(room);
   if (alive.length <= 1) return endGame(room);
   room.round++;
   room.lastOut = []; room.nobody = false;
-  for (const p of room.players.values()) { p.seat = null; p.pick = null; p.lockUntil = 0; clearTimeout(p.timer); }
+  resetSeats(room);
   const drop = alive.length >= 8 ? 2 : 1;
-  room.chairs = Array.from({ length: Math.max(1, alive.length - drop) }, () => ({ owner: null, pub: null, answer: null }));
-  const songs = listSongs();
-  if (room.song !== 'random' && songs.includes(room.song)) room.currentSong = room.song;
-  else if (songs.length) {
-    const pool = songs.length > 1 ? songs.filter((s) => s !== room.lastSong) : songs;
-    room.currentSong = pick(pool);
-  } else room.currentSong = null; // client falls back to the built-in house band
-  room.lastSong = room.currentSong;
+  room.chairs = Array.from({ length: Math.max(1, alive.length - drop) }, () => ({ owner: null, pub: null, answer: null, kind: 'answer' }));
+  room.currentSong = room.lastSong = pickSong(room);
   room.phase = 'intro';
   setPhaseTimer(room, T_INTRO, () => startMusic(room));
   pushState(room);
@@ -358,15 +336,25 @@ function startMusic(room) {
   room.phase = 'music';
   room.musicStart = Date.now();
   // the stop time is secret: clients are never told how long the music will run
-  const dur = T_MUSIC_MIN + Math.random() * (T_MUSIC_MAX - T_MUSIC_MIN);
-  setPhaseTimer(room, dur, () => startScramble(room));
+  const { musicMin, musicMax } = room.settings;
+  setPhaseTimer(room, (musicMin + Math.random() * (musicMax - musicMin)) * 1000, () => startScramble(room));
   pushState(room);
 }
 function startScramble(room) {
+  if (room.phase !== 'music') return;
   room.phase = 'scramble';
-  const puzzles = makePuzzles(room.chairs.length);
-  room.chairs.forEach((c, i) => { c.pub = puzzles[i].pub; c.answer = normAnswer(puzzles[i].answer); });
-  setPhaseTimer(room, T_SCRAMBLE, () => endScramble(room));
+  const now = Date.now();
+  const puzzles = makePuzzles(room.chairs.length, room.settings.puzzles, room.usedQ);
+  clearChairTimers(room);
+  room.chairs.forEach((c, i) => {
+    const p = puzzles[i];
+    Object.assign(c, { pub: p.pub, kind: p.kind, answer: p.answer != null ? normAnswer(p.answer) : null, need: p.need || 0, taps: new Map(), goAt: 0 });
+    if (c.kind === 'reaction') {
+      c.goAt = now + 1500 + rnd(3500);
+      room.chairTimers.push(setTimeout(() => pushState(room), c.goAt - now));
+    }
+  });
+  setPhaseTimer(room, room.settings.scramble * 1000, () => endScramble(room));
   pushState(room);
   for (const p of room.players.values()) if (p.bot && p.alive) botThink(room, p, 900 + Math.random() * 1200);
 }
@@ -379,6 +367,11 @@ function claimChair(room, p, i) {
   checkScrambleDone(room);
   return true;
 }
+function wrongAnswer(room, p, i) {
+  p.lockUntil = Date.now() + WRONG_LOCK;
+  if (p.conn) p.conn.send({ t: 'wrong', lock: WRONG_LOCK, chair: i });
+  sendRoom(room, { t: 'miss', id: p.id });
+}
 function checkScrambleDone(room) {
   if (room.phase !== 'scramble') return;
   const waiting = alivePlayers(room).filter((p) => p.seat == null);
@@ -386,6 +379,7 @@ function checkScrambleDone(room) {
 }
 function endScramble(room) {
   if (room.phase !== 'scramble') return;
+  clearChairTimers(room);
   const alive = alivePlayers(room);
   const seated = alive.filter((p) => p.seat != null);
   room.phase = 'results';
@@ -396,18 +390,28 @@ function endScramble(room) {
     for (const p of losers) { p.alive = false; p.pick = null; room.outOrder.push({ id: p.id, name: p.prof.name }); }
     room.lastOut = losers.map((p) => p.id);
   }
-  setPhaseTimer(room, room.lastOut.length ? T_RESULTS : 2600, () => nextRound(room));
+  setPhaseTimer(room, room.lastOut.length ? T_RESULTS : 2600, () => afterResults(room));
   pushState(room);
 }
+function afterResults(room) {
+  if (alivePlayers(room).length <= 1) return endGame(room);
+  if (room.settings.manual) { // wait for the host to press "Start round"
+    clearTimeout(room.timer);
+    room.phase = 'ready'; room.phaseEnds = 0; room.chairs = []; room.lastOut = [];
+    resetSeats(room);
+    return pushState(room);
+  }
+  beginRound(room);
+}
 function endGame(room) {
-  clearTimeout(room.timer);
+  clearTimeout(room.timer); clearChairTimers(room);
   const winner = alivePlayers(room)[0] || null;
   room.phase = 'gameover';
   room.winner = winner ? winner.id : null;
   room.standings = [...(winner ? [{ id: winner.id, name: winner.prof.name }] : []), ...room.outOrder.slice().reverse()].slice(0, 12);
   room.chairs = [];
   for (const p of room.players.values()) {
-    if (p.bot || !p.inGame || !p.conn) continue;
+    if (p.bot || !p.inGame) continue;
     const before = levelForXp(p.prof.xp);
     const gained = 15 + 12 * (p.seats || 0) + (winner === p ? 50 : 0);
     p.prof.xp += gained;
@@ -418,7 +422,7 @@ function endGame(room) {
         if (it.level > before && it.level <= after) unlocked.push({ kind, name: it.name || it.e });
       }
     }
-    p.conn.send({ t: 'xp', gained, leveled: after > before, unlocked, me: meInfo(p.conn) });
+    if (p.conn) p.conn.send({ t: 'xp', gained, leveled: after > before, unlocked, me: meInfo(p.conn) });
   }
   saveProfiles();
   setPhaseTimer(room, T_GAMEOVER, () => resetToLobby(room));
@@ -433,9 +437,11 @@ function botThink(room, bot, delay) {
     if (!free.length) return;
     const i = pick(free);
     bot.pick = i; pushState(room);
-    bot.timer = setTimeout(() => {
+    bot.timer = setTimeout(function attempt() {
       if (room.dead || room.phase !== 'scramble' || bot.seat != null) return;
-      if (room.chairs[i].owner) return botThink(room, bot, 500 + Math.random() * 900);
+      const ch = room.chairs[i];
+      if (ch.owner) return botThink(room, bot, 500 + Math.random() * 900);
+      if (ch.kind === 'reaction' && Date.now() < ch.goAt + 250) { bot.timer = setTimeout(attempt, ch.goAt + 250 + rnd(500) - Date.now()); return; }
       if (Math.random() < 0.2) { sendRoom(room, { t: 'miss', id: bot.id }); return botThink(room, bot, WRONG_LOCK); }
       claimChair(room, bot, i);
     }, 2600 + Math.random() * 6000);
@@ -458,31 +464,42 @@ function addBot(room) {
 
 function destroyRoom(room) {
   room.dead = true;
-  clearTimeout(room.timer);
-  for (const p of room.players.values()) clearTimeout(p.timer);
+  clearTimeout(room.timer); clearChairTimers(room);
+  for (const p of room.players.values()) { clearTimeout(p.timer); clearTimeout(p.awayTimer); }
   rooms.delete(room.code);
   pushLobby();
 }
 function removePlayer(room, p) {
-  clearTimeout(p.timer);
+  if (!p) return;
+  clearTimeout(p.timer); clearTimeout(p.awayTimer);
   room.players.delete(p.id);
-  if (p.conn) p.conn.room = null;
-  if (p.inGame && p.alive && room.phase !== 'lobby' && room.phase !== 'gameover') room.outOrder.push({ id: p.id, name: p.prof.name });
+  if (p.conn && p.conn.room === room) p.conn.room = null;
+  if (p.inGame && p.alive && room.phase !== 'lobby' && room.phase !== 'gameover') {
+    p.alive = false;
+    room.outOrder.push({ id: p.id, name: p.prof.name });
+  }
   if (!humans(room).length) return destroyRoom(room);
-  if (room.hostId === p.id) room.hostId = humans(room)[0].id;
+  if (room.hostId === p.id) passHost(room);
   pushState(room); pushLobby();
   if (room.phase === 'lobby' || room.phase === 'gameover') return;
   if (alivePlayers(room).length <= 1 && room.phase !== 'results') return endGame(room);
   checkScrambleDone(room);
 }
-function joinRoom(conn, room) {
-  if (conn.room) removePlayer(conn.room, conn.room.players.get(conn.pid));
-  room.players.set(conn.pid, { id: conn.pid, conn, prof: conn.prof, inGame: false, alive: false, seat: null, pick: null, seats: 0, lockUntil: 0 });
-  conn.room = room;
+function attach(conn, room, p) { // (re)connect a socket to its seat in a room
+  clearTimeout(p.awayTimer); p.awayTimer = null;
+  p.conn = conn; conn.room = room;
+  if (room.ownerId === conn.pid) room.hostId = conn.pid; // the original host always gets control back
   conn.send({ t: 'joined', code: room.code });
   conn.send(roomState(room));
   pushState(room); pushLobby();
 }
+function joinRoom(conn, room) {
+  if (conn.room && conn.room !== room) removePlayer(conn.room, conn.room.players.get(conn.pid));
+  const p = { id: conn.pid, conn: null, prof: conn.prof, inGame: false, alive: false, seat: null, pick: null, seats: 0, lockUntil: 0, awayTimer: null };
+  room.players.set(conn.pid, p);
+  attach(conn, room, p);
+}
+const hostOf = (conn) => (conn.room && conn.room.hostId === conn.pid ? conn.room : null);
 
 // ───────────────────────────── message handling ─────────────────────────────
 const handlers = {
@@ -492,21 +509,38 @@ const handlers = {
     const room = {
       code: newRoomCode(), name: cleanText(m.name, 28) || `${conn.prof.name}'s show`,
       vis: m.vis === 'private' ? 'private' : 'public', pw: null,
-      max: Math.min(12, Math.max(2, m.max | 0 || 8)), players: new Map(), hostId: conn.pid,
-      phase: 'lobby', round: 0, chairs: [], song: 'random', currentSong: null, lastSong: null,
+      max: Math.min(12, Math.max(2, m.max | 0 || 8)), players: new Map(), hostId: conn.pid, ownerId: conn.pid,
+      phase: 'lobby', round: 0, chairs: [], currentSong: null, lastSong: null, settings: defaultSettings(),
       lastOut: [], outOrder: [], nobody: false, winner: null, standings: null, phaseEnds: 0, musicStart: 0,
+      banned: new Set(), usedQ: new Set(), chairTimers: [],
     };
     if (pw) { const salt = crypto.randomBytes(16); room.pw = { salt, hash: hashPw(pw, salt) }; }
     rooms.set(room.code, room);
     joinRoom(conn, room);
+  },
+  peek(conn, m) { // invite-link landing page: show the room before joining
+    const code = String(m.code || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+    const room = rooms.get(code);
+    if (!room) return conn.send({ t: 'peek', code, found: false });
+    conn.send({
+      t: 'peek', code, found: true, name: room.name, players: room.players.size, max: room.max,
+      locked: !!room.pw && conn.pid !== room.ownerId, playing: room.phase !== 'lobby',
+      host: room.players.get(room.hostId)?.prof.name || '', member: room.players.has(conn.pid),
+    });
   },
   joinRoom(conn, m) {
     const code = String(m.code || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
     const room = rooms.get(code);
     if (!room) return conn.send({ t: 'joinfail', reason: 'notfound', code });
     if (conn.room === room) return conn.send(roomState(room));
+    const existing = room.players.get(conn.pid);
+    if (existing && !existing.bot) { // coming back after a dropped connection
+      if (conn.room) removePlayer(conn.room, conn.room.players.get(conn.pid));
+      return attach(conn, room, existing);
+    }
+    if (room.banned.has(conn.pid)) return conn.send({ t: 'joinfail', reason: 'kicked', code });
     if (room.players.size >= room.max) return conn.send({ t: 'joinfail', reason: 'full', code });
-    if (room.pw) {
+    if (room.pw && conn.pid !== room.ownerId) {
       const pw = String(m.password || '').slice(0, 64);
       if (!pw) return conn.send({ t: 'joinfail', reason: 'password', code, name: room.name });
       if (++conn.pwFails > 12) return conn.close();
@@ -548,20 +582,31 @@ const handlers = {
     conn.lastEmote = now;
     sendRoom(room, { t: 'emote', id: conn.pid, e: it.e });
   },
-  songs(conn) { songCache.at = 0; conn.send({ t: 'songs', songs: listSongs() }); },
-  setSong(conn, m) {
-    const room = conn.room; if (!room || room.hostId !== conn.pid) return;
-    const s = String(m.song || 'random');
-    room.song = s === 'random' || listSongs().includes(s) ? s : 'random';
-    pushState(room);
-  },
-  addBot(conn) { const room = conn.room; if (room && room.hostId === conn.pid) addBot(room); },
+  songs(conn) { songCache.at = 0; conn.send({ t: 'music', ...musicInfo() }); },
+
+  // ── host controls ──
+  settings(conn, m) { const room = hostOf(conn); if (room) { applySettings(room, m); pushState(room); } },
+  addBot(conn) { const room = hostOf(conn); if (room) addBot(room); },
   removeBot(conn) {
-    const room = conn.room; if (!room || room.hostId !== conn.pid || room.phase !== 'lobby') return;
+    const room = hostOf(conn); if (!room || room.phase !== 'lobby') return;
     const bots = [...room.players.values()].filter((p) => p.bot);
     if (bots.length) removePlayer(room, bots[bots.length - 1]);
   },
-  start(conn) { const room = conn.room; if (room && room.hostId === conn.pid) startGame(room); },
+  kick(conn, m) {
+    const room = hostOf(conn); if (!room) return;
+    const id = String(m.id || '');
+    const p = room.players.get(id);
+    if (!p || id === conn.pid || id === room.ownerId) return;
+    if (!p.bot) room.banned.add(id);
+    if (p.conn) p.conn.send({ t: 'kicked' });
+    removePlayer(room, p);
+  },
+  start(conn) { const room = hostOf(conn); if (room) startGame(room); },
+  nextRound(conn) { const room = hostOf(conn); if (room && room.phase === 'ready') beginRound(room); },
+  skipMusic(conn) { const room = hostOf(conn); if (room && room.phase === 'music') { clearTimeout(room.timer); startScramble(room); } },
+  endShow(conn) { const room = hostOf(conn); if (room && room.phase !== 'lobby') resetToLobby(room); },
+
+  // ── playing ──
   pick(conn, m) {
     const room = conn.room; if (!room || room.phase !== 'scramble') return;
     const p = room.players.get(conn.pid); const i = m.chair | 0;
@@ -571,13 +616,28 @@ const handlers = {
   answer(conn, m) {
     const room = conn.room; if (!room || room.phase !== 'scramble') return;
     const p = room.players.get(conn.pid); const i = m.chair | 0; const chair = room.chairs[i];
+    if (!p || !p.alive || p.seat != null || !chair || chair.owner || chair.kind !== 'answer') return;
+    if (Date.now() < p.lockUntil) return;
+    if (normAnswer(m.a) === chair.answer) return void claimChair(room, p, i);
+    wrongAnswer(room, p, i);
+  },
+  tap(conn, m) { // reaction + button-mash games
+    const room = conn.room; if (!room || room.phase !== 'scramble') return;
+    const p = room.players.get(conn.pid); const i = m.chair | 0; const chair = room.chairs[i];
     if (!p || !p.alive || p.seat != null || !chair || chair.owner) return;
     const now = Date.now();
     if (now < p.lockUntil) return;
-    if (normAnswer(m.a) === chair.answer) return void claimChair(room, p, i);
-    p.lockUntil = now + WRONG_LOCK;
-    conn.send({ t: 'wrong', lock: WRONG_LOCK, chair: i });
-    sendRoom(room, { t: 'miss', id: p.id });
+    if (chair.kind === 'reaction') {
+      if (now < chair.goAt) return wrongAnswer(room, p, i); // false start
+      return void claimChair(room, p, i);
+    }
+    if (chair.kind === 'mash') {
+      let t = chair.taps.get(p.id);
+      if (!t) chair.taps.set(p.id, (t = { n: 0, last: 0 }));
+      if (now - t.last < MASH_GAP) return;
+      t.last = now;
+      if (++t.n >= chair.need) claimChair(room, p, i);
+    }
   },
 };
 
@@ -587,14 +647,19 @@ function onMessage(conn, text) {
   if (!m || typeof m !== 'object' || typeof m.t !== 'string') return;
   const now = Date.now();
   if (now - conn.rateAt > 1000) { conn.rateAt = now; conn.rateN = 0; }
-  if (++conn.rateN > 40) return conn.close();
+  if (++conn.rateN > 60) return conn.close();
 
   if (!conn.pid) {
     if (m.t !== 'hello') return;
     const token = String(m.token || '');
     if (!/^[a-f0-9]{32,64}$/.test(token)) return conn.close();
     const pid = sha('pid:' + token).slice(0, 12);
-    if (byPid.has(pid)) return conn.send({ t: 'dup' });
+    const old = byPid.get(pid);
+    if (old) { // same player opened a new connection (refresh, network change, other tab): the newest wins
+      byPid.delete(pid);
+      old.send({ t: 'replaced' });
+      old.end();
+    }
     const key = sha('profile:' + token);
     let prof = profiles[key];
     if (!prof) prof = profiles[key] = { name: cleanText(m.name, 16) || 'Contestant ' + (1000 + rnd(9000)), xp: 0, dance: 'strut', death: 'poof', ring: 'none' };
@@ -603,8 +668,12 @@ function onMessage(conn, text) {
     byPid.set(pid, conn);
     const av = avatars.get(pid);
     if (av) clearTimeout(av.timer); // reconnected inside the grace period
-    conn.send({ t: 'welcome', me: meInfo(conn), catalog: CATALOG, songs: listSongs() });
+    conn.send({ t: 'welcome', me: meInfo(conn), catalog: CATALOG, groups: GROUPS, music: musicInfo() });
     conn.send(lobbyList());
+    if (old && old.room && !old.room.dead) {
+      const p = old.room.players.get(pid);
+      if (p) attach(conn, old.room, p);
+    }
     return;
   }
   if (m.t === 'hello' || !Object.prototype.hasOwnProperty.call(handlers, m.t)) return;
@@ -612,9 +681,17 @@ function onMessage(conn, text) {
 }
 function onClose(conn) {
   conns.delete(conn);
-  if (!conn.pid || byPid.get(conn.pid) !== conn) return;
+  if (!conn.pid || byPid.get(conn.pid) !== conn) return; // replaced by a newer connection
   byPid.delete(conn.pid);
-  if (conn.room) removePlayer(conn.room, conn.room.players.get(conn.pid));
+  const room = conn.room;
+  const p = room && room.players.get(conn.pid);
+  if (p && p.conn === conn) { // keep their spot for a while in case they come back
+    p.conn = null;
+    clearTimeout(p.awayTimer);
+    p.awayTimer = setTimeout(() => { if (!p.conn && room.players.get(p.id) === p && !room.dead) removePlayer(room, p); }, RECONNECT_GRACE_MS);
+    if (room.hostId === p.id) passHost(room);
+    pushState(room);
+  }
   scheduleAvatarRemoval(conn.pid);
 }
 
@@ -640,7 +717,7 @@ class Conn {
     socket.on('close', () => this.end());
     socket.on('error', () => this.end());
   }
-  end() { if (!this.open) return; this.open = false; this.socket.destroy(); onClose(this); }
+  end() { if (!this.open) return; this.open = false; this.socket.end(); setTimeout(() => this.socket.destroy(), 200); onClose(this); }
   close() { if (!this.open) return; try { this.socket.write(encodeFrame(Buffer.alloc(0), 8)); } catch {} this.end(); }
   sendRaw(frame) { if (this.open && this.socket.writable) this.socket.write(frame); }
   send(obj) { this.sendRaw(encodeFrame(JSON.stringify(obj))); }
@@ -678,7 +755,7 @@ class Conn {
 setInterval(() => {
   const ping = encodeFrame(Buffer.alloc(0), 9);
   for (const c of conns) { if (!c.alive) { c.end(); continue; } c.alive = false; c.sendRaw(ping); }
-}, 25000).unref();
+}, 20000).unref();
 
 // ───────────────────────────── HTTP ─────────────────────────────
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
@@ -743,12 +820,13 @@ const server = http.createServer((req, res) => {
       const buf = Buffer.concat(chunks);
       const type = sniffImage(buf);
       if (!type) return sendJson(res, 415, { error: 'unsupported image' });
-      if (byPid.get(conn.pid) !== conn) return sendJson(res, 401, { error: 'not connected' });
-      const old = avatars.get(conn.pid);
+      const now = tokenConn(req);
+      if (!now) return sendJson(res, 401, { error: 'not connected' });
+      const old = avatars.get(now.pid);
       if (old) clearTimeout(old.timer);
       const hash = crypto.createHash('sha1').update(buf).digest('hex').slice(0, 12);
-      avatars.set(conn.pid, { buf, type, hash, timer: null });
-      avatarChanged(conn);
+      avatars.set(now.pid, { buf, type, hash, timer: null });
+      avatarChanged(now);
       sendJson(res, 200, { hash });
     });
     return;
@@ -782,6 +860,7 @@ server.on('upgrade', (req, socket) => {
 });
 
 server.listen(PORT, () => {
+  const m = musicInfo();
   console.log(`SIT SHOW is on air → http://localhost:${PORT}`);
-  console.log(`Music directory: ${MUSIC_DIR} (${listSongs().length} MP3s)`);
+  console.log(`Music directory: ${MUSIC_DIR} (${m.songs.length} MP3s in ${m.cats.length} categories)`);
 });
