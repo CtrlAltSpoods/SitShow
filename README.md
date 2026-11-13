@@ -57,8 +57,10 @@ with ffmpeg (included in the Docker image) and every player's browser turns loud
 down and quiet ones up, with a limiter so nothing clips. Results are cached in the
 database; new or changed files are measured in the background.
 
-**The stage reacts to the bass**: the floor flashes and pulses, the lights and bulbs punch
-and the crowd bounces on the beat, and the screen beside the stage shows the live spectrum.
+**The stage reacts to the bass** while everyone circles the chairs: the floor flashes and
+pulses, the lights and bulbs punch and the crowd bounces on each beat (detected from sudden
+rises in the low end, so it works on loud, compressed tracks too), and the screen beside the
+stage shows the live spectrum.
 
 There's never dead air: between rounds a built-in game-show vamp plays, and while players
 are solving a built-in ticking "thinking" loop plays (it speeds up in the last 5 seconds).

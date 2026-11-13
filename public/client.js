@@ -449,7 +449,7 @@ for (const b of $$('[data-avatar-remove]')) b.addEventListener('click', () => {
 // (pre-round vamp / guessing-time ticker, or MP3s from the Intro Music / Thinking Music folders),
 // and sound effects. Synth music is generated here, so it's always stream safe.
 const Snd = (() => {
-  let ac = null, master = null, bus = null, analyser = null, spec = null, cur = null, gen = 0, seq = null, bed = { kind: null, file: null }, wantBed = null;
+  let ac = null, master = null, bus = null, analyser = null, spec = null, bassAn = null, bassBuf = null, cur = null, gen = 0, seq = null, bed = { kind: null, file: null }, wantBed = null;
   const trims = {}; // element -> GainNode applying the track's loudness correction
   const gains = new Map(); // file -> dB (from the server's loudness analysis)
   let vol = +(LS.get('sitshow.vol') ?? 10) / 100;
@@ -466,8 +466,14 @@ const Snd = (() => {
       const lim = ac.createDynamicsCompressor();
       lim.threshold.value = -3; lim.knee.value = 0; lim.ratio.value = 20; lim.attack.value = 0.002; lim.release.value = 0.2;
       analyser = ac.createAnalyser(); analyser.fftSize = 1024; analyser.smoothingTimeConstant = 0.45;
+      analyser.minDecibels = -90; analyser.maxDecibels = -10; // wide range so loud masters don't pin the meter
       spec = new Uint8Array(analyser.frequencyBinCount);
       bus.connect(lim).connect(analyser).connect(master);
+      // beat detection taps a low-passed copy (kick + bass) and reads raw samples, which never saturate
+      const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 150; lp.Q.value = 0.7;
+      bassAn = ac.createAnalyser(); bassAn.fftSize = 1024; bassBuf = new Float32Array(bassAn.fftSize);
+      const sink = ac.createGain(); sink.gain.value = 0;
+      lim.connect(lp).connect(bassAn).connect(sink).connect(ac.destination);
       for (const [name, el] of [['music', music], ['bgm', bgm]]) {
         const tg = ac.createGain(); ac.createMediaElementSource(el).connect(tg).connect(bus);
         trims[name] = tg; el.volume = 1;
@@ -621,7 +627,13 @@ const Snd = (() => {
   }
   function setVol(v) { vol = v; music.volume = bgm.volume = elVol(); if (master) master.gain.value = v; LS.set('sitshow.vol', Math.round(v * 100)); }
   function spectrum() { if (!analyser || ac.state !== 'running') return null; analyser.getByteFrequencyData(spec); return spec; }
-  return { unlock, sfx, play, prep, stop, bed: startBed, stopBed, setVol, spectrum, setUrgency(u) { urgency = u ? 1 : 0; }, get vol() { return vol; }, get bedKind() { return bed.kind; } };
+  function bassLevel() { // dB level of the low end over the last ~20 ms
+    if (!bassAn || ac.state !== 'running') return null;
+    bassAn.getFloatTimeDomainData(bassBuf);
+    let sum = 0; for (let i = 0; i < bassBuf.length; i++) sum += bassBuf[i] * bassBuf[i];
+    return 10 * Math.log10(sum / bassBuf.length + 1e-12);
+  }
+  return { unlock, sfx, play, prep, stop, bed: startBed, stopBed, setVol, spectrum, bassLevel, setUrgency(u) { urgency = u ? 1 : 0; }, get vol() { return vol; }, get bedKind() { return bed.kind; } };
 })();
 addEventListener('pointerdown', Snd.unlock, { capture: true });
 addEventListener('keydown', Snd.unlock, { capture: true });
@@ -1099,7 +1111,7 @@ const cv = $('stage'), g = cv.getContext('2d');
 const wrap = $('stageWrap');
 let W = 0, H = 0, DPR = 1, L = { cx: 0, cy: 0, RX: 1, RY: 1, s: 1, vh: 30 }, bgBack = null, bgFloor = null, spin = 0, lastT = performance.now();
 const ents = new Map(); // id -> render entity
-const BEAT = { at: -1e9, avg: 0, hue: 300, pulse: 0, spec: null };
+const BEAT = { at: -1e9, prev: -120, slow: -60, hist: [], hue: 300, pulse: 0, spec: null };
 const confetti = [];
 const imgCache = new Map();
 const DEATH_MS = 2500;
@@ -1547,13 +1559,22 @@ function frame(now) {
   } else tm.hidden = true;
 
   const idle = r.phase === 'lobby' || r.phase === 'gameover' || r.phase === 'ready';
-  // bass → beat: compare the low end (≈45–190 Hz) with its running average
-  const sp = Snd.spectrum();
-  let bass = 0;
-  if (sp) { for (let i = 1; i <= 4; i++) bass += sp[i]; bass /= 4; }
-  BEAT.avg = BEAT.avg * 0.95 + bass * 0.05;
-  if (sp && bass > 100 && bass > BEAT.avg * 1.18 + 6 && now - BEAT.at > 240) { BEAT.at = now; BEAT.hue = (BEAT.hue + 53) % 360; }
-  const strength = r.phase === 'music' ? 1 : r.phase === 'scramble' ? 0.25 : 0.5;
+  // beats: only while everyone circles the chairs. Onset detection on the low end — a beat is a sudden
+  // rise in bass energy compared with how much it has been rising recently, so it adapts to quiet,
+  // loud or heavily compressed tracks alike.
+  const circling = r.phase === 'music';
+  const sp = Snd.spectrum(), lv = circling ? Snd.bassLevel() : null;
+  if (lv != null) {
+    const rise = Math.max(0, lv - BEAT.prev); BEAT.prev = lv;
+    const h = BEAT.hist; h.push(rise); if (h.length > 60) h.shift();
+    const mean = h.reduce((a, b) => a + b, 0) / h.length;
+    const sd = Math.sqrt(h.reduce((a, b) => a + (b - mean) ** 2, 0) / h.length);
+    BEAT.slow = BEAT.slow * 0.98 + lv * 0.02;
+    if (h.length > 12 && rise > Math.max(0.8, mean + 1.6 * sd) && lv > -55 && lv > BEAT.slow - 3 && now - BEAT.at > 230) {
+      BEAT.at = now; BEAT.hue = (BEAT.hue + 53) % 360;
+    }
+  } else { BEAT.hist.length = 0; BEAT.prev = -120; }
+  const strength = circling ? 1 : 0;
   const pulse = Math.exp(-(now - BEAT.at) / 170) * strength;
   BEAT.pulse = pulse; BEAT.spec = sp;
   if (r.phase === 'music') spin += dt * 0.6 * (r.settings.speed ? 1.1 : 1); else if (idle) spin += dt * 0.14;
