@@ -818,7 +818,7 @@ function renderHost() {
     box.append(el('h3', { text: 'Tonight\'s show' }),
       el('div', { class: 'now', text: `Host: ${nameOf(r, r.hostId)}${r.ownerId !== r.hostId ? ' (stand-in)' : ''}` }),
       el('div', { class: 'now', text: songLine }),
-      st.manual && el('div', { class: 'now', text: 'The host starts each round' }));
+      st.manual ? el('div', { class: 'now', text: 'The host starts each round' }) : '');
     return;
   }
   box.append(el('h3', { text: '👑 Host controls' + (r.ownerId !== S.me.id ? ' (standing in)' : '') }));
@@ -1045,11 +1045,15 @@ document.addEventListener('keydown', (e) => {
 
 // ───────────────────────────── chat (green room + players who are out) ─────────────────────────────
 let chatUnread = 0;
-let chatOpen = S.streamer ? false : LS.get('sitshow.chatOpen') !== '0'; // hidden by default in streamer mode
+const narrow = () => matchMedia('(max-width: 900px)').matches;
+// hidden by default in streamer mode (and on phones, where it would cover the stage)
+let chatOpen = S.streamer || (narrow() && LS.get('sitshow.chatOpen') == null) ? false : LS.get('sitshow.chatOpen') !== '0';
 function setChatOpen(open, remember = true) {
   chatOpen = open;
   $('chat').classList.toggle('closed', !open);
+  $('room').classList.toggle('chat-closed', !open);
   $('chatToggle').setAttribute('aria-expanded', String(open));
+  $('chatTab').setAttribute('aria-expanded', String(open));
   if (remember) LS.set('sitshow.chatOpen', open ? '1' : '0');
   if (open) { chatUnread = 0; updateChatBadge(); const log = $('chatLog'); log.scrollTop = log.scrollHeight; }
 }
@@ -1078,7 +1082,8 @@ function renderChatState(r) {
   $('chatForm').querySelector('button').disabled = !ok;
   $('chatWho').textContent = r.phase === 'lobby' || r.phase === 'gameover' ? 'green room' : 'the gallery';
 }
-$('chatToggle').addEventListener('click', () => setChatOpen(!chatOpen));
+$('chatToggle').addEventListener('click', () => setChatOpen(false));
+$('chatTab').addEventListener('click', () => { setChatOpen(true); if (!$('chatInput').disabled) $('chatInput').focus(); });
 $('chatForm').addEventListener('submit', (e) => {
   e.preventDefault();
   const v = $('chatInput').value.trim();

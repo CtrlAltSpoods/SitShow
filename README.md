@@ -154,9 +154,10 @@ to the original host when they reconnect. Anyone who drops keeps their spot for 
   knock out about a sixth of the field each round, so a full studio finishes in ~12 rounds.
 - **The gallery**: knocked-out players and late joiners watch from a stepped platform on
   the right of the stage until the next show.
-- **Chat** (side panel): open in the green room, and in the gallery during a show. Players
-  still in the show can read it but can't post until they're out or the show ends. It can be
-  collapsed, and starts collapsed in streamer mode.
+- **Chat** (left sidebar): open in the green room, and in the gallery during a show. Players
+  still in the show can read it but can't post until they're out or the show ends. « slides
+  it away to a tab on the left (with an unread count); it starts hidden in streamer mode and
+  on phones, where it opens as a drawer over the stage.
 - Account holders have a blue ✓ next to their name. Volume starts at 10%.
 
 ## Controls

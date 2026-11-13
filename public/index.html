@@ -143,6 +143,22 @@
   </header>
 
   <div class="room-body">
+    <aside class="chat-side" id="chat" aria-label="Chat">
+      <div class="chat-panel">
+        <div class="chat-head">
+          <span>💬 Chat <small id="chatWho"></small></span>
+          <button class="chat-close" id="chatToggle" type="button" title="Hide chat" aria-label="Hide chat" aria-expanded="true">«</button>
+        </div>
+        <ul class="chat-log" id="chatLog" aria-live="polite"></ul>
+        <form class="chat-form" id="chatForm">
+          <input id="chatInput" maxlength="200" autocomplete="off" placeholder="Say something…" aria-label="Chat message">
+          <button class="btn small" type="submit">Send</button>
+        </form>
+      </div>
+      <button class="chat-tab" id="chatTab" type="button" title="Show chat" aria-label="Show chat">
+        <span class="chat-tab-icon">💬</span><span class="chat-tab-text">CHAT</span><span class="chat-badge" id="chatBadge" hidden></span>
+      </button>
+    </aside>
     <div class="stage-wrap" id="stageWrap">
       <canvas id="stage"></canvas>
       <div class="letterbox top" aria-hidden="true"></div>
@@ -176,18 +192,6 @@
       <ul class="players" id="playerList"></ul>
       <p class="hint keys">During a scramble: click a chair or press <kbd>Tab</kbd> to switch, <kbd>1</kbd>–<kbd>4</kbd> to answer, <kbd>Space</kbd> for tap games.</p>
       </div>
-      <section class="chat" id="chat">
-        <button class="chat-head" id="chatToggle" type="button" aria-expanded="true">
-          <span>💬 Chat <small id="chatWho"></small></span><span class="chat-badge" id="chatBadge" hidden></span><span class="chev">▾</span>
-        </button>
-        <div class="chat-body" id="chatBody">
-          <ul class="chat-log" id="chatLog" aria-live="polite"></ul>
-          <form class="chat-form" id="chatForm">
-            <input id="chatInput" maxlength="200" autocomplete="off" placeholder="Say something…" aria-label="Chat message">
-            <button class="btn small" type="submit">Send</button>
-          </form>
-        </div>
-      </section>
     </aside>
   </div>
 </main>
