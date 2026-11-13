@@ -25,6 +25,7 @@ const RECONNECT_GRACE_MS = +process.env.RECONNECT_GRACE_MS || 60 * 1000; // a dr
 const AVATAR_MAX_BYTES = 200 * 1024;
 const WS_MAX_PAYLOAD = 16 * 1024;
 const MAX_ROOMS = 200;
+const MAX_PLAYERS = 30;
 
 const T_INTRO = 3500;
 const T_RESULTS = 5200;
@@ -112,8 +113,14 @@ function loadProf(row) {
 function saveProf(p) { try { store.save(p); } catch (e) { console.warn('Could not save player', p.id, e.message); } }
 
 // Account names are reserved; bot names belong to the studio.
-const BOT_KEYS = new Set(['Sir Sits-a-Lot', 'Stool Pigeon', 'Recliner Rex', 'Cushion Crusher', 'Wobbly Wanda', 'Beanbag Bob',
-  'Ottoman Empire', 'Lazy Susan', 'Deck Chair Dave', 'Throne Ranger', 'Squeaky Hinge', 'Pouffe Daddy'].map(nameKey));
+const BOT_NAMES = ['Sir Sits-a-Lot', 'Stool Pigeon', 'Recliner Rex', 'Cushion Crusher', 'Wobbly Wanda', 'Beanbag Bob',
+  'Ottoman Empire', 'Lazy Susan', 'Deck Chair Dave', 'Throne Ranger', 'Squeaky Hinge', 'Pouffe Daddy',
+  'Captain Comfy', 'Lounge Lizard', 'Barstool Barry', 'Rocking Ruth', 'Futon Fiona', 'Settee Steve',
+  'Chaise Lounge', 'Highchair Hank', 'Swivel Sal', 'Armrest Arnie', 'Bench Warmer', 'Saddle Sam',
+  'Couch Potato', 'Hammock Hal', 'Divan Diva', 'Love Seat Lou', 'Pew Pete', 'Folding Fran'];
+const BOT_FACES = ['🐙', '🦄', '🐸', '🦖', '🐧', '🦊', '🐼', '🐵', '🦁', '🐯', '🐨', '🐔',
+  '🐻', '🦎', '🐰', '🦉', '🐢', '🦩', '🐳', '🦀', '🐝', '🦓', '🥔', '🐹', '🦔', '🐊', '🦒', '🐞', '🦜', '🐿️'];
+const BOT_KEYS = new Set(BOT_NAMES.map(nameKey));
 function nameBlocked(name, id) {
   const key = nameKey(name);
   if (!key) return false;
@@ -197,9 +204,6 @@ const conns = new Set();
 const byPid = new Map(); // player id -> live connection
 const rooms = new Map();
 
-const BOT_NAMES = ['Sir Sits-a-Lot', 'Stool Pigeon', 'Recliner Rex', 'Cushion Crusher', 'Wobbly Wanda', 'Beanbag Bob',
-  'Ottoman Empire', 'Lazy Susan', 'Deck Chair Dave', 'Throne Ranger', 'Squeaky Hinge', 'Pouffe Daddy'];
-const BOT_FACES = ['🐙', '🦄', '🐸', '🦖', '🐧', '🦊', '🐼', '🐵', '🦁', '🐯', '🐨', '🐔'];
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 function newRoomCode() {
   for (;;) {
@@ -347,7 +351,8 @@ function beginRound(room) {
   room.round++;
   room.lastOut = []; room.nobody = false;
   resetSeats(room);
-  const drop = alive.length >= 8 ? 2 : 1;
+  // big shows lose about a sixth of the field per round, so 30 players still finish in ~12 rounds
+  const drop = alive.length >= 8 ? Math.max(2, Math.round(alive.length / 6)) : 1;
   room.chairs = Array.from({ length: Math.max(1, alive.length - drop) }, () => ({ owner: null, pub: null, answer: null, kind: 'answer' }));
   room.currentSong = room.lastSong = pickSong(room);
   room.phase = 'intro';
@@ -531,7 +536,7 @@ const handlers = {
     const room = {
       code: newRoomCode(), name: cleanText(m.name, 28) || `${conn.prof.name}'s show`,
       vis: m.vis === 'private' ? 'private' : 'public', pw: null,
-      max: Math.min(12, Math.max(2, m.max | 0 || 8)), players: new Map(), hostId: conn.pid, ownerId: conn.pid,
+      max: Math.min(MAX_PLAYERS, Math.max(2, m.max | 0 || 8)), players: new Map(), hostId: conn.pid, ownerId: conn.pid,
       phase: 'lobby', round: 0, chairs: [], currentSong: null, lastSong: null, settings: defaultSettings(),
       lastOut: [], outOrder: [], nobody: false, winner: null, standings: null, phaseEnds: 0, musicStart: 0,
       banned: new Set(), usedQ: new Set(), chairTimers: [],

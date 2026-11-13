@@ -638,7 +638,8 @@ function onPhase(r, prev) {
       if (r.nobody) { banner('NOBODY SAT DOWN!', "Let's try that again…", 'teal'); break; }
       const now = performance.now();
       for (const id of r.out) { const e = ents.get(id); if (e) { e.deathAt = now; e.deathKind = r.byId.get(id)?.death || 'poof'; } }
-      if (r.out.length) { Snd.sfx('out'); banner(r.out.map((id) => nameOf(r, id)).join(' & ') + (r.out.length > 1 ? ' ARE OUT!' : ' IS OUT!'), '', 'red'); }
+      if (r.out.length > 3) { Snd.sfx('out'); banner(`${r.out.length} CONTESTANTS ARE OUT!`, r.out.map((id) => nameOf(r, id)).join(' · '), 'red'); }
+      else if (r.out.length) { Snd.sfx('out'); banner(r.out.map((id) => nameOf(r, id)).join(' & ') + (r.out.length > 1 ? ' ARE OUT!' : ' IS OUT!'), '', 'red'); }
       else banner('EVERYBODY SURVIVES!', '', 'teal');
       break;
     }
@@ -754,6 +755,7 @@ function renderHost() {
   if (r.phase === 'lobby') {
     box.append(el('div', { class: 'row' },
       el('button', { class: 'btn small', text: '+ Bot', disabled: r.players.length >= r.max, onclick: () => send({ t: 'addBot' }) }),
+      el('button', { class: 'btn small', text: '+5', title: 'Add 5 bots', disabled: r.players.length >= r.max, onclick: () => { for (let i = 0; i < 5; i++) send({ t: 'addBot' }); } }),
       el('button', { class: 'btn small ghost', text: '− Bot', disabled: !bots, onclick: () => send({ t: 'removeBot' }) })),
       el('button', { class: 'btn gold wide', text: '▶ Start the show', disabled: r.players.length < 2, onclick: () => send({ t: 'start' }) }));
     if (r.players.length < 2) box.append(el('p', { class: 'hint', text: 'You need at least 2 contestants. Invite someone or add a bot.' }));
@@ -816,6 +818,7 @@ function renderPuzzle() {
   }
   const tabs = $('chairTabs');
   if (tabs) { // update in place so a click isn't lost when a state update lands mid-press
+    tabs.classList.toggle('many', r.chairs.length > 12);
     if (tabs.children.length !== r.chairs.length) {
       tabs.textContent = '';
       r.chairs.forEach((_, i) => tabs.append(el('button', { type: 'button', onclick: () => pickChair(i) })));
@@ -1201,10 +1204,16 @@ function drawSparkles(t) {
   }
 }
 function chairPos(i, n) {
+  if (n > 10) { // big shows: an inner and an outer ring of chairs
+    const inner = Math.round(n * 0.38), ring = i < inner ? 0 : 1, k = ring ? i - inner : i, m = ring ? n - inner : inner;
+    const f = ring ? 0.74 : 0.4, a = -Math.PI / 2 + (k * TAU) / m + (ring ? Math.PI / m : 0);
+    return { x: L.cx + Math.cos(a) * L.RX * f, y: L.cy + Math.sin(a) * L.RY * f, a };
+  }
   const f = n <= 1 ? 0 : n === 2 ? 0.28 : n <= 4 ? 0.42 : 0.56;
   const a = -Math.PI / 2 + (i * TAU) / n + (n === 2 ? Math.PI / 2 : 0);
   return { x: L.cx + Math.cos(a) * L.RX * f, y: L.cy + Math.sin(a) * L.RY * f, a };
 }
+const chairScale = (n) => L.s * (n <= 10 ? 1 : clamp(1 - (n - 10) * 0.017, 0.68, 1));
 function getImg(p) {
   if (!p.av) return null;
   const key = p.id + p.av; let im = imgCache.get(key);
@@ -1434,7 +1443,8 @@ function frame(now) {
   // where everyone should be
   const onStage = r.players.filter((p) => (idle ? true : p.inGame && p.alive));
   const audience = r.players.filter((p) => !onStage.includes(p));
-  const nCh = r.chairs.length, items = [];
+  const nCh = r.chairs.length, items = [], cs = chairScale(nCh);
+  const crowd = clamp(1 - (onStage.length - 10) * 0.015, 0.7, 1); // shrink dancers in big shows
   const seen = new Set();
   const place = (p, tx, ty, mode, sc) => {
     seen.add(p.id);
@@ -1450,15 +1460,16 @@ function frame(now) {
   };
   onStage.forEach((p, i) => {
     if (r.phase === 'gameover' && p.id === r.winner) return place(p, cx, cy + 6 * s, 'ring', s * 1.25);
-    if (p.seat != null && nCh) { const c = chairPos(p.seat, nCh); return place(p, c.x, c.y - 18 * s, 'sit', s); }
+    if (p.seat != null && nCh) { const c = chairPos(p.seat, nCh); return place(p, c.x, c.y - 18 * cs, 'sit', cs); }
     if (r.phase === 'scramble' && p.pick != null && nCh && r.chairs[p.pick]) {
       const c = chairPos(p.pick, nCh), a = (nCh <= 1 ? 0 : c.a) + (sr(strHash(p.id), 1) - 0.5) * (nCh <= 1 ? TAU : 2.2);
-      return place(p, c.x + Math.cos(a) * 54 * s, c.y + Math.sin(a) * 30 * s, 'pick', s);
+      return place(p, c.x + Math.cos(a) * 54 * cs, c.y + Math.sin(a) * 30 * cs, 'pick', cs);
     }
     const a = (i / onStage.length) * TAU + spin, y = cy + Math.sin(a) * RY;
-    place(p, cx + Math.cos(a) * RX, y, 'ring', s * (0.86 + 0.28 * ((y - (cy - RY)) / (2 * RY))));
+    place(p, cx + Math.cos(a) * RX, y, 'ring', s * crowd * (0.86 + 0.28 * ((y - (cy - RY)) / (2 * RY))));
   });
-  audience.forEach((p, i) => place(p, W - 34 - i * 46, H - 30, 'aud', 0.55));
+  const cols = Math.max(1, Math.floor((W * 0.45) / 40)); // spectators: rows along the bottom-right
+  audience.forEach((p, i) => place(p, W - 30 - (i % cols) * 40, H - 30 - Math.floor(i / cols) * 40, 'aud', 0.5));
   for (const id of ents.keys()) if (!seen.has(id)) ents.delete(id);
 
   r.chairs.forEach((c, i) => {
@@ -1470,7 +1481,7 @@ function frame(now) {
   const E = { top: 0, right: W, w: W, h: H };
   const audItems = [];
   for (const it of items) {
-    if (it.chair != null) { drawChair(g, it.pos.x, it.pos.y, s, it.chair, it.st, t); continue; }
+    if (it.chair != null) { drawChair(g, it.pos.x, it.pos.y, cs, it.chair, it.st, t); continue; }
     if (it.e.mode === 'aud' && !it.dying) { audItems.push(it); continue; }
     const { p, e } = it, isMe = p.id === S.me.id;
     if (it.dying) {
@@ -1491,7 +1502,7 @@ function frame(now) {
   }
   drawAudience(t, r);
   for (const { p, e } of audItems) drawAvatar(g, e.x, e.y, e.sc, p, t, { alpha: p.away ? 0.45 : 0.95 });
-  if (audItems.length) { g.font = `700 11px ${FONT_B}`; g.textAlign = 'right'; g.fillStyle = 'rgba(255,243,214,.7)'; g.fillText('WATCHING', W - 12, H - 74); }
+  if (audItems.length) { g.font = `700 11px ${FONT_B}`; g.textAlign = 'right'; g.fillStyle = 'rgba(255,243,214,.7)'; g.fillText('WATCHING', W - 12, H - 74 - Math.floor((audItems.length - 1) / cols) * 40); }
 
   // emote bubbles float above everything
   g.textAlign = 'center'; g.textBaseline = 'middle';
@@ -1517,8 +1528,8 @@ function frame(now) {
 cv.addEventListener('pointerdown', (ev) => {
   const r = S.room; if (!r || r.phase !== 'scramble') return;
   const b = cv.getBoundingClientRect(), x = ev.clientX - b.left, y = ev.clientY - b.top;
-  let best = null, bd = 70 * L.s;
-  r.chairs.forEach((c, i) => { if (c.owner) return; const p = chairPos(i, r.chairs.length), d = Math.hypot(p.x - x, p.y - 40 * L.s - y); if (d < bd) { bd = d; best = i; } });
+  let best = null, bd = 70 * chairScale(r.chairs.length);
+  r.chairs.forEach((c, i) => { if (c.owner) return; const p = chairPos(i, r.chairs.length), d = Math.hypot(p.x - x, p.y - 40 * chairScale(r.chairs.length) - y); if (d < bd) { bd = d; best = i; } });
   if (best != null) pickChair(best);
 });
 

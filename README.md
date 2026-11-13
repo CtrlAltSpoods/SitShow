@@ -126,6 +126,8 @@ to the original host when they reconnect. Anyone who drops keeps their spot for 
 - **Emotes**, **levels and XP**, and unlockable **dances**, **dramatic exits**,
   **avatar frames** and more emotes. The wardrobe sits in the profile panel on the
   home page and behind 🎭 in a show; you can preview locked items.
+- Up to **30 players** per show (bots included). Big shows use two rings of chairs and
+  knock out about a sixth of the field each round, so a full studio finishes in ~12 rounds.
 - Late joiners watch from the audience. Volume starts at 10%.
 
 ## Controls

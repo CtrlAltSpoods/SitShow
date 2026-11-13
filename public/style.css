@@ -225,6 +225,7 @@ select option { color: #111; }
 @keyframes pop { from { transform: skew(-6deg) rotate(-8deg) scale(.2); opacity: 0; } }
 .banner-sub { margin-top: 10px; font-size: clamp(.85rem, 2vw, 1.1rem); text-shadow: 0 2px 6px #000; display: inline-block; background: rgba(10,4,24,.65); border-radius: 99px; padding: 3px 14px; }
 .banner-sub:empty { display: none; }
+.banner-sub { max-width: min(64%, 620px); line-height: 1.35; }
 .stage-btn { position: absolute; left: 50%; top: 74%; transform: translate(-50%, -50%); z-index: 4; font-size: 1.3rem; padding: 14px 26px; animation: nudge 1.6s ease-in-out infinite; }
 .stage-btn:active { transform: translate(-50%, calc(-50% + 3px)); }
 @keyframes nudge { 50% { filter: brightness(1.25); box-shadow: 0 4px 0 var(--s), 0 0 40px rgba(255,200,61,.6); } }
@@ -249,6 +250,8 @@ select option { color: #111; }
 .chair-tabs button { border: 2px solid var(--ink); background: #fff; color: var(--ink); border-radius: 9px; padding: 2px 9px; font-family: var(--display); font-size: .8rem; cursor: pointer; }
 .chair-tabs button.sel { background: var(--pink); color: #fff; }
 .chair-tabs button.taken { opacity: .35; text-decoration: line-through; cursor: default; }
+.chair-tabs.many { gap: 4px; max-height: 64px; overflow-y: auto; }
+.chair-tabs.many button { padding: 1px 6px; font-size: .7rem; }
 .chair-tabs .rivals { font-family: var(--body); font-size: .7rem; margin-left: 3px; }
 .pz-cat { display: inline-block; background: var(--ink); color: var(--gold); font-family: var(--display); font-size: .62rem; letter-spacing: .12em; text-transform: uppercase; padding: 2px 8px; border-radius: 99px; margin-bottom: 4px; }
 .pz-title { font-family: var(--display); font-size: 1rem; line-height: 1.2; }
