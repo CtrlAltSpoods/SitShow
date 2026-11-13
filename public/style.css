@@ -276,7 +276,10 @@ select option { color: #111; }
   font-family: var(--display); font-size: 1.3rem; background: var(--ink); border: 4px solid var(--gold); font-variant-numeric: tabular-nums; }
 .timer.low { border-color: #ff3b53; color: #ff8a98; animation: pulse .5s infinite; }
 
-.emote-bar { position: absolute; left: 10px; bottom: 86px; z-index: 4; display: flex; gap: 7px; flex-wrap: wrap; max-width: min(40%, 290px); } /* sits above the crowd */
+.emote-bar { position: absolute; left: 10px; bottom: 86px; z-index: 4; display: flex; gap: 7px; flex-wrap: wrap; max-width: calc(100% - 20px); } /* one line above the crowd, wrapping only if it doesn't fit */
+.emote-bar button.wave { width: auto; padding: 0 14px; border-radius: 99px; font-size: 1rem; font-family: var(--display); color: var(--cream); background: linear-gradient(135deg, #1f6fd1, #19e3c9); border-color: rgba(255,255,255,.5); }
+.emote-bar button.wave.calling { animation: nudge 0.8s ease-in-out infinite; box-shadow: 0 0 22px #19e3c9; }
+.wave-call { position: absolute; left: 10px; bottom: 146px; z-index: 4; background: rgba(10,4,24,.9); border: 2px solid var(--teal); border-radius: 99px; padding: 5px 14px; font-size: .9rem; pointer-events: none; animation: toast-in .25s; }
 .emote-bar button { width: 48px; height: 48px; border-radius: 50%; border: 2px solid rgba(255,255,255,.3); background: rgba(20,8,40,.88); font-size: 25px; cursor: pointer; transition: transform .1s; padding: 0; box-shadow: 0 4px 12px rgba(0,0,0,.5); }
 .emote-bar button:hover { transform: scale(1.18) rotate(-8deg); border-color: var(--gold); }
 .emote-bar button.locked { opacity: .6; font-size: 10px; width: auto; padding: 0 9px; border-radius: 99px; color: var(--cream); }
@@ -335,6 +338,28 @@ select option { color: #111; }
 .puzzle.locked .pz-lock i { animation: drain 2s linear forwards; }
 @keyframes drain { to { width: 0; } }
 .pz-status { text-align: center; font-family: var(--display); font-size: 1.25rem; padding: 6px; }
+.pz-prompt.multi { white-space: pre-line; font-family: var(--body); font-weight: 700; font-size: 1.35rem; line-height: 1.45; }
+.pz-dice { display: flex; justify-content: center; gap: 12px; margin: 10px 0 12px; flex-wrap: wrap; }
+.die { width: 58px; height: 58px; border-radius: 12px; background: #fff; border: 3px solid var(--ink); display: grid; grid-template-columns: repeat(3, 1fr); padding: 6px; gap: 2px; transform: rotate(var(--r)); box-shadow: 0 4px 0 rgba(0,0,0,.25); }
+.die i { border-radius: 50%; }
+.die i.on { background: var(--ink); }
+.pz-clock { display: block; width: 130px; height: 130px; margin: 6px auto 4px; }
+.pz-clock .face { fill: #fff; stroke: var(--ink); stroke-width: 3; }
+.pz-clock .tick { stroke: var(--ink); stroke-width: 2.5; stroke-linecap: round; }
+.pz-clock .hour { stroke: var(--ink); stroke-width: 5; stroke-linecap: round; }
+.pz-clock .min { stroke: var(--pink); stroke-width: 3; stroke-linecap: round; }
+.pz-clock .pin { fill: var(--ink); }
+.pz-spot { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 8px; }
+.pz-tiles.spot { gap: 3px; margin: 0; }
+.pz-tiles.spot > * { aspect-ratio: 1; display: grid; place-items: center; font-size: 1.3rem; border-radius: 8px; padding: 0; }
+.pz-tiles.spot span { background: rgba(0,0,0,.08); }
+.pz-tiles.spot button { background: #fff; box-shadow: 0 2px 0 rgba(0,0,0,.25); border: 2px solid var(--ink); }
+.pz-simon { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; width: min(240px, 80%); margin: 8px auto 0; }
+.pz-simon .pad { aspect-ratio: 1.4; border: 0; border-radius: 16px; cursor: pointer; opacity: .55; box-shadow: 0 5px 0 rgba(0,0,0,.35); transition: opacity .08s, transform .08s; touch-action: manipulation; }
+.pz-simon .p0 { background: #ff3b53; } .pz-simon .p1 { background: #3f7dff; } .pz-simon .p2 { background: #20c26b; } .pz-simon .p3 { background: #ffd23d; }
+.pz-simon .pad.lit { opacity: 1; transform: scale(1.06); box-shadow: 0 0 24px currentColor, 0 5px 0 rgba(0,0,0,.35); }
+.pz-simon.watching .pad { cursor: default; }
+.pz-watch { text-align: center; font-family: var(--display); font-size: 2.6rem; margin: 6px 0 2px; font-variant-numeric: tabular-nums; }
 
 /* side panel */
 .side { background: rgba(14,6,30,.94); border-left: 3px solid rgba(255,200,61,.4); display: flex; flex-direction: column; min-height: 0; }
@@ -416,6 +441,7 @@ select option { color: #111; }
   .pc-stats { grid-template-columns: repeat(2, 1fr); }
   .wardrobe-preview { display: flex; flex-direction: column; align-items: center; }
   .emote-bar { max-width: calc(100% - 80px); bottom: auto; top: 8px; }
+  .wave-call { bottom: auto; top: 60px; }
   .emote-bar button { width: 40px; height: 40px; font-size: 21px; }
   .banner { top: 58px; }
   #room.scrambling .side { display: none; } /* give the stage the whole screen while puzzles are up */

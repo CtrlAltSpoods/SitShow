@@ -147,6 +147,24 @@ const on = {
   },
   emote(m) { const e = ents.get(m.id); if (e) { e.emotes.push({ e: m.e, at: performance.now() }); if (e.emotes.length > 4) e.emotes.shift(); } Snd.sfx('blip'); },
   miss(m) { const e = ents.get(m.id); if (e) e.missAt = performance.now(); },
+  sw(m) { // stopwatch verdict from the server
+    const r = S.room; if (!r || m.chair !== S.myPick) return;
+    const target = r.chairs[m.chair]?.puzzle?.target || 0, off = (m.dt - target) / 1000;
+    const msg = `${(m.dt / 1000).toFixed(2)} s — ${m.ok ? 'nailed it!' : (off > 0 ? '+' : '') + off.toFixed(2) + ' s off'}`;
+    S.swMsg = { key: mgKey(), msg };
+    const d = $('puzzle').querySelector('.pz-watch'); if (d) d.textContent = msg;
+  },
+  waveCall(m) {
+    const pill = $('waveCall');
+    pill.textContent = `🌊 ${m.id === S.me.id ? 'You want' : m.name + ' wants'} a Mexican wave! ${m.n}/${m.need} — tap 🌊 to join in`;
+    pill.hidden = false; clearTimeout(pill._t); pill._t = setTimeout(() => { pill.hidden = true; }, 3000);
+    const b = $('emoteBar').querySelector('.wave'); if (b) { b.classList.add('calling'); clearTimeout(b._t); b._t = setTimeout(() => b.classList.remove('calling'), 3000); }
+  },
+  wave(m) {
+    WAVE.at = performance.now(); WAVE.ids = new Set(m.ids);
+    $('waveCall').hidden = true;
+    Snd.sfx('wave');
+  },
   claim(m) {
     Snd.sfx(m.id === S.me.id ? 'win' : 'ding');
     const e = ents.get(m.id); if (e) e.claimAt = performance.now();
@@ -566,6 +584,9 @@ const Snd = (() => {
     fanfare: (t) => [[523, 0], [523, 0.15], [523, 0.3], [698, 0.45], [659, 0.75], [784, 0.9], [1046, 1.2]].forEach(([f, d], i) => { tone(f, t + d, i === 6 ? 0.9 : 0.25, 'square', 0.1); tone(f / 2, t + d, i === 6 ? 0.9 : 0.25, 'sawtooth', 0.08); }),
     level: (t) => [659, 784, 988, 1319, 1568].forEach((f, i) => tone(f, t + i * 0.09, 0.35, 'triangle', 0.16)),
     go: (t) => { tone(1318, t, 0.12, 'square', 0.12); tone(1760, t + 0.1, 0.2, 'square', 0.12); },
+    simon0: (t) => tone(330, t, 0.25, 'triangle', 0.2), simon1: (t) => tone(415, t, 0.25, 'triangle', 0.2),
+    simon2: (t) => tone(494, t, 0.25, 'triangle', 0.2), simon3: (t) => tone(659, t, 0.25, 'triangle', 0.2),
+    wave: (t) => { noise(t, 1.6, 300, 2400, 0.22); for (let i = 0; i < 6; i++) tone(500 + i * 120, t + i * 0.18, 0.35, 'sine', 0.05, 900 + i * 140); },
   };
   function sfx(name) { if (!ac || ac.state !== 'running' || !FX[name]) return; FX[name](ac.currentTime + 0.01); }
 
@@ -912,6 +933,23 @@ function mashTap() {
   if (f && pz) f.style.width = Math.min(100, (st.n / pz.need) * 100) + '%';
   if (c && pz) c.textContent = `${Math.min(st.n, pz.need)} / ${pz.need}`;
 }
+function swTap() { // stopwatch game: first press starts, second stops; the readout hides after a second
+  if (locked() || S.myPick == null) return;
+  const st = mg();
+  tap();
+  if (!st.started) {
+    st.started = performance.now(); S.swMsg = null;
+    const tick = () => {
+      if (!st.started || mg() !== st) return;
+      const d = $('puzzle').querySelector('.pz-watch'), el2 = (performance.now() - st.started) / 1000;
+      if (d) d.textContent = el2 < 1 ? el2.toFixed(1) : '?.?';
+      st.raf = requestAnimationFrame(tick);
+    };
+    tick();
+  } else { st.started = 0; cancelAnimationFrame(st.raf); }
+  const b = $('puzzle').querySelector('.pz-pad');
+  if (b) { b.className = 'pz-pad ' + (st.started ? 'wait' : 'go'); b.textContent = st.started ? 'STOP!' : 'START'; }
+}
 function renderPuzzle() {
   const r = S.room, box = $('puzzle'); const me = r?.byId.get(S.me.id);
   if (!r || r.phase !== 'scramble' || !me || !me.alive) { box.hidden = true; pzKey = ''; return; }
@@ -919,7 +957,7 @@ function renderPuzzle() {
   const pz = r.chairs[S.myPick]?.puzzle, st = mg();
   let sub = '';
   if (pz?.kind === 'reaction') sub = pz.go ? 'go' : 'wait';
-  if (pz?.kind === 'memory') sub = st.phase || 'show';
+  if (pz?.kind === 'memory' || pz?.kind === 'simon') sub = st.phase || 'show';
   const key = me.seat != null ? 'safe' : `${r.round}:${S.myPick}:${sub}:${st.reset || 0}`;
   if (key !== pzKey) {
     if (pz?.kind === 'reaction' && sub === 'go' && pzKey.endsWith('wait:' + (st.reset || 0))) Snd.sfx('go');
@@ -950,22 +988,73 @@ function buildChallenge(box, pz, st) {
   if (pz.cat) box.append(el('div', { class: 'pz-cat', text: pz.cat }));
   box.append(el('div', { class: 'pz-title', text: pz.title }));
   if (pz.prompt) {
-    const pr = el('div', { class: 'pz-prompt' + (pz.ink ? ' inked' : pz.kind === 'choice' ? ' small' : ''), text: pz.prompt });
+    const pr = el('div', { class: 'pz-prompt' + (pz.ink ? ' inked' : pz.multiline ? ' multi' : pz.kind === 'choice' ? ' small' : ''), text: pz.prompt });
     if (pz.ink) pr.style.color = pz.ink;
     box.append(pr);
   }
+  const choiceGrid = () => {
+    const long = pz.choices.some((c) => [...c].length > 11);
+    const grid = el('div', { class: 'pz-choices' + (pz.big ? ' big' : '') + (long ? ' long' : '') + (pz.tf ? ' tf' : '') });
+    pz.choices.forEach((ch, i) => grid.append(el('button', { type: 'button', onclick: () => submitAnswer(ch) }, el('i', { text: String(i + 1) }), document.createTextNode(ch))));
+    box.append(grid);
+  };
+  const typeBox = () => {
+    const inp = el('input', { maxlength: 30, autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', inputmode: pz.numeric ? 'numeric' : 'text', 'aria-label': 'Your answer', placeholder: 'Type your answer' });
+    box.append(el('form', { class: 'pz-type', onsubmit: (e) => { e.preventDefault(); submitAnswer(inp.value.trim()); } }, inp, el('button', { class: 'btn primary', text: 'SIT!' })));
+    setTimeout(() => { if (!locked()) inp.focus(); }, 30);
+  };
   switch (pz.kind) {
-    case 'choice': {
-      const long = pz.choices.some((c) => [...c].length > 11);
-      const grid = el('div', { class: 'pz-choices' + (pz.big ? ' big' : '') + (long ? ' long' : '') + (pz.tf ? ' tf' : '') });
-      pz.choices.forEach((ch, i) => grid.append(el('button', { type: 'button', onclick: () => submitAnswer(ch) }, el('i', { text: String(i + 1) }), document.createTextNode(ch))));
-      box.append(grid);
+    case 'choice': choiceGrid(); break;
+    case 'type': typeBox(); break;
+    case 'dice': {
+      const PIPS = { 1: [4], 2: [0, 8], 3: [0, 4, 8], 4: [0, 2, 6, 8], 5: [0, 2, 4, 6, 8], 6: [0, 2, 3, 5, 6, 8] };
+      box.append(el('div', { class: 'pz-dice' }, ...pz.dice.map((d, i) => el('div', { class: 'die', style: `--r:${(i % 2 ? 1 : -1) * (4 + i * 3)}deg` },
+        ...Array.from({ length: 9 }, (_, k) => el('i', { class: PIPS[d].includes(k) ? 'on' : '' }))))));
+      typeBox();
       break;
     }
-    case 'type': {
-      const inp = el('input', { maxlength: 30, autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', inputmode: pz.numeric ? 'numeric' : 'text', 'aria-label': 'Your answer', placeholder: 'Type your answer' });
-      box.append(el('form', { class: 'pz-type', onsubmit: (e) => { e.preventDefault(); submitAnswer(inp.value.trim()); } }, inp, el('button', { class: 'btn primary', text: 'SIT!' })));
-      setTimeout(() => { if (!locked()) inp.focus(); }, 30);
+    case 'clock': {
+      const ns = 'http://www.w3.org/2000/svg', svg = document.createElementNS(ns, 'svg');
+      svg.setAttribute('viewBox', '-50 -50 100 100'); svg.setAttribute('class', 'pz-clock');
+      const add = (tag, attrs) => { const n = document.createElementNS(ns, tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); svg.append(n); };
+      add('circle', { r: 46, class: 'face' });
+      for (let i = 0; i < 12; i++) { const a = (i * Math.PI) / 6; add('line', { x1: Math.sin(a) * 38, y1: -Math.cos(a) * 38, x2: Math.sin(a) * 43, y2: -Math.cos(a) * 43, class: 'tick' }); }
+      const ha = (((pz.h % 12) + pz.m / 60) * Math.PI) / 6, ma = (pz.m * Math.PI) / 30;
+      add('line', { x1: 0, y1: 0, x2: Math.sin(ha) * 22, y2: -Math.cos(ha) * 22, class: 'hour' });
+      add('line', { x1: 0, y1: 0, x2: Math.sin(ma) * 35, y2: -Math.cos(ma) * 35, class: 'min' });
+      add('circle', { r: 3, class: 'pin' });
+      box.append(svg);
+      choiceGrid();
+      break;
+    }
+    case 'spotdiff': {
+      const grid = (cells, clickable) => el('div', { class: 'pz-tiles spot', style: `grid-template-columns:repeat(${pz.cols},1fr)` },
+        ...cells.map((e, i) => (clickable ? el('button', { type: 'button', text: e, onclick: () => submitAnswer(String(i)) }) : el('span', { text: e }))));
+      box.append(el('div', { class: 'pz-spot' }, grid(pz.left, false), grid(pz.right, true)));
+      break;
+    }
+    case 'simon': {
+      const phase = st.phase || 'show';
+      const pads = el('div', { class: 'pz-simon' + (phase === 'show' ? ' watching' : '') });
+      const btns = [0, 1, 2, 3].map((k) => el('button', { type: 'button', class: 'pad p' + k, 'aria-label': ['Red', 'Blue', 'Green', 'Yellow'][k], onpointerdown: (e) => {
+        e.preventDefault();
+        if (phase === 'show' || locked() || (st.picked ||= []).length >= pz.seq.length) return;
+        st.picked.push(k); flash(k);
+        if (st.picked.length === pz.seq.length) submitAnswer(st.picked.join(','));
+      } }));
+      const flash = (k) => { btns[k].classList.add('lit'); Snd.sfx('simon' + k); setTimeout(() => btns[k].classList.remove('lit'), 260); };
+      pads.append(...btns);
+      box.append(pads, el('p', { class: 'hint', text: phase === 'show' ? 'Watch…' : 'Your turn — repeat it!' }));
+      if (phase === 'show' && !st.timer) {
+        pz.seq.forEach((k, i) => setTimeout(() => flash(k), 500 + i * 560));
+        st.timer = setTimeout(() => { st.phase = 'input'; st.picked = []; renderPuzzle(); }, 700 + pz.seq.length * 560);
+      }
+      break;
+    }
+    case 'stopwatch': {
+      const disp = el('div', { class: 'pz-watch', text: S.swMsg && S.swMsg.key === mgKey() && !st.started ? S.swMsg.msg : '0.0' });
+      const btn = el('button', { type: 'button', class: 'pz-pad ' + (st.started ? 'wait' : 'go'), text: st.started ? 'STOP!' : 'START', onpointerdown: (e) => { e.preventDefault(); swTap(); } });
+      box.append(disp, btn, el('p', { class: 'hint', text: 'The clock disappears after 1 second — count it in your head. Space bar works too.' }));
       break;
     }
     case 'reaction':
@@ -1034,10 +1123,10 @@ document.addEventListener('keydown', (e) => {
     for (let k = 1; k <= n; k++) { const i = ((S.myPick ?? -1) + (e.shiftKey ? -k : k) + n * 2) % n; if (!r.chairs[i].owner) { pickChair(i); break; } }
   } else if (e.target.tagName === 'INPUT') {
     // typing an answer (or chatting)
-  } else if (e.key === ' ' && pz && (pz.kind === 'reaction' || pz.kind === 'mash')) {
+  } else if (e.key === ' ' && pz && (pz.kind === 'reaction' || pz.kind === 'mash' || pz.kind === 'stopwatch')) {
     e.preventDefault();
     if (e.repeat) return;
-    if (pz.kind === 'reaction') tap(); else mashTap();
+    if (pz.kind === 'reaction') tap(); else if (pz.kind === 'stopwatch') swTap(); else mashTap();
   } else if (/^[1-4]$/.test(e.key) && pz && pz.kind === 'choice' && pz.choices[+e.key - 1] != null) {
     submitAnswer(pz.choices[+e.key - 1]);
   }
@@ -1075,7 +1164,9 @@ function canChat(r) {
   if (!r || !me) return false;
   return r.phase === 'lobby' || r.phase === 'gameover' || !(me.inGame && me.alive);
 }
+function updateWaveBtn(r) { const b = $('emoteBar').querySelector('.wave'); if (b) b.hidden = !canChat(r); }
 function renderChatState(r) {
+  updateWaveBtn(r);
   const ok = canChat(r), inp = $('chatInput');
   inp.disabled = !ok;
   inp.placeholder = ok ? 'Say something…' : 'You can chat once you\'re out — or back in the green room';
@@ -1166,6 +1257,8 @@ function renderEmoteBar() {
     if (em.level > S.me.level) { bar.append(el('button', { class: 'locked', title: `Next emote ${em.e} unlocks at level ${em.level}`, text: '🔒' + em.level, onclick: openWardrobe })); break; }
     bar.append(el('button', { title: 'Emote', text: em.e, onclick: () => send({ t: 'emote', id: em.id }) }));
   }
+  bar.append(el('button', { class: 'wave', title: 'Start (or join) a Mexican wave — open to the green room and the gallery', text: '🌊 Wave', onclick: () => send({ t: 'wave' }) }));
+  if (S.room) updateWaveBtn(S.room);
 }
 const preview = { dance: 'strut', death: null, deathAt: 0, ring: 'none', init: false };
 function renderWardrobe() {
@@ -1214,6 +1307,13 @@ const wrap = $('stageWrap');
 let W = 0, H = 0, DPR = 1, L = { cx: 0, cy: 0, RX: 1, RY: 1, s: 1, vh: 30 }, bgBack = null, bgFloor = null, spin = 0, lastT = performance.now();
 const ents = new Map(); // id -> render entity
 const BEAT = { at: -1e9, hue: 300, pulse: 0, spec: null };
+const WAVE = { at: -1e9, ids: new Set() };
+function waveLift(x) { // 0..1: how far the Mexican wave has lifted someone standing at x
+  const k = (performance.now() - WAVE.at) / 2200;
+  if (k <= 0 || k >= 1) return 0;
+  const crest = -160 + k * (W + 320), d = (x - crest) / 120;
+  return Math.exp(-d * d);
+}
 // Beat tracking: spectral-flux onsets are binned every 20 ms; every 400 ms the last 6 s are autocorrelated to find
 // the tempo, a comb finds where the beats fall, and pulses fire on that grid. Tracks without a clear
 // rhythm get no pulses at all, and stray bass notes between beats don't set anything off.
@@ -1275,7 +1375,7 @@ function analyseTempo(now, bin) {
   if (BT.next && BT.period && Math.abs(BT.next - next) < period * 0.3) next = BT.next * 0.6 + next * 0.4; // smooth corrections
   BT.period = period; BT.conf = ac[bestL] / r0; BT.next = next;
 }
-if (/[?&]debug=1/.test(location.search)) window.__sitshow = { BT, BEAT };
+if (/[?&]debug=1/.test(location.search)) window.__sitshow = { BT, BEAT, showChallenge(pz) { const box = $('puzzle'); box.hidden = false; box.textContent = ''; buildChallenge(box, pz, {}); } };
 const confetti = [];
 const imgCache = new Map();
 const DEATH_MS = 2500;
@@ -1528,14 +1628,15 @@ function drawAudience(t, r) {
     for (let i = 0, x = row ? 4 : -12; x < W + 20; x += spacing, i++) {
       const seed = i * 7.3 + row * 13;
       const bob = mood === 1 ? Math.abs(Math.sin(t * 4.4 + seed)) * 4 + BEAT.pulse * (4 + sr(seed, 3) * 6) : mood === 2 ? Math.abs(Math.sin(t * 7 + seed)) * 8 : mood === 3 ? Math.sin(t * 20 + seed) * 1.5 : Math.sin(t * 1.3 + seed);
-      const hy = y - 26 * Z - bob, sc = (0.9 + sr(seed, 9) * 0.25) * Z;
+      const wl = waveLift(x), up = wl * 26 * Z;
+      const hy = y - 26 * Z - bob - up, sc = (0.9 + sr(seed, 9) * 0.25) * Z;
       g.fillStyle = row ? '#0a0414' : '#1e0d36';
-      if (mood === 2 && sr(seed, 1) > 0.45) { // arms up!
+      if ((mood === 2 && sr(seed, 1) > 0.45) || wl > 0.3) { // arms up!
         g.strokeStyle = g.fillStyle; g.lineWidth = 5; g.lineCap = 'round';
         g.lineWidth = 5 * Z;
-        g.beginPath(); g.moveTo(x - 10 * Z, y - 14 * Z - bob); g.lineTo(x - 15 * Z, hy - 16 * Z); g.moveTo(x + 10 * Z, y - 14 * Z - bob); g.lineTo(x + 15 * Z, hy - 16 * Z); g.stroke();
+        g.beginPath(); g.moveTo(x - 10 * Z, y - 14 * Z - bob - up); g.lineTo(x - 15 * Z, hy - 16 * Z); g.moveTo(x + 10 * Z, y - 14 * Z - bob - up); g.lineTo(x + 15 * Z, hy - 16 * Z); g.stroke();
       }
-      ellipse(g, x, y - bob * 0.3, 17 * sc, 14 * sc); g.fill();
+      ellipse(g, x, y - bob * 0.3 - up * 0.85, 17 * sc, 14 * sc); g.fill();
       ellipse(g, x, hy, 9 * sc, 10 * sc); g.fill();
       g.strokeStyle = row ? 'rgba(150,90,255,.18)' : 'rgba(255,120,200,.22)'; g.lineWidth = 1.5; g.beginPath(); g.arc(x, hy, 9 * sc, Math.PI * 1.1, Math.PI * 1.9); g.stroke();
       if (mood && sr(seed, 2) > 0.86) { // phone lights
@@ -1888,7 +1989,11 @@ function frame(now) {
   if (gal.n) {
     drawGallery(gal, t);
     audItems.sort((a, b) => a.e.y - b.e.y);
-    for (const { p, e } of audItems) { drawAvatar(g, e.x, e.y, e.sc, p, t, { alpha: p.away ? 0.45 : 1, noShadow: true }); drawTag(g, e.x, e.y, e.sc * 0.9, p, p.id === S.me.id); }
+    for (const { p, e } of audItems) {
+      const jump = -waveLift(e.x) * 70 * e.sc;
+      drawAvatar(g, e.x, e.y, e.sc, p, t, { alpha: p.away ? 0.45 : 1, noShadow: true, dy: jump });
+      drawTag(g, e.x, e.y + jump, e.sc * 0.9, p, p.id === S.me.id);
+    }
   }
   drawAudience(t, r);
 

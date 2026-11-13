@@ -455,7 +455,7 @@ function startScramble(room) {
   clearChairTimers(room);
   room.chairs.forEach((c, i) => {
     const p = puzzles[i];
-    Object.assign(c, { pub: p.pub, kind: p.kind, answer: p.answer != null ? normAnswer(p.answer) : null, need: p.need || 0, taps: new Map(), goAt: 0 });
+    Object.assign(c, { pub: p.pub, kind: p.kind, answer: p.answer != null ? normAnswer(p.answer) : null, need: p.need || 0, target: p.target || 0, taps: new Map(), sw: new Map(), goAt: 0 });
     if (c.kind === 'reaction') {
       c.goAt = now + 1500 + rnd(3500);
       room.chairTimers.push(setTimeout(() => pushState(room), c.goAt - now));
@@ -762,6 +762,28 @@ const handlers = {
     sendRoom(room, msg);
   },
 
+  // Mexican wave: anyone not currently competing (green room, gallery) can call for one. When enough
+  // of them press within 3 s, the whole crowd goes.
+  wave(conn) {
+    const room = conn.room; if (!room) return;
+    const p = room.players.get(conn.pid); if (!p) return;
+    const live = room.phase !== 'lobby' && room.phase !== 'gameover';
+    if (live && p.inGame && p.alive) return;
+    const now = Date.now();
+    if (now - (room.lastWave || 0) < 8000) return;
+    room.waveTaps = (room.waveTaps || new Map());
+    for (const [id, t] of room.waveTaps) if (now - t > 3000) room.waveTaps.delete(id);
+    room.waveTaps.set(p.id, now);
+    const eligible = [...room.players.values()].filter((x) => !x.bot && x.conn && !(live && x.inGame && x.alive)).length;
+    const need = Math.max(1, Math.min(5, Math.ceil(eligible * 0.4)));
+    const ids = [...room.waveTaps.keys()];
+    if (ids.length >= need) {
+      room.lastWave = now; room.waveTaps.clear();
+      sendRoom(room, { t: 'wave', ids });
+      for (const id of ids) { const w = room.players.get(id); if (w && !w.bot) { bump(w, (st) => st.waves++); award(w); } }
+    } else sendRoom(room, { t: 'waveCall', id: p.id, name: conn.prof.name, n: ids.length, need });
+  },
+
   // ── host controls ──
   settings(conn, m) { const room = hostOf(conn); if (room) { applySettings(room, m); pushState(room); } },
   addBot(conn) { const room = hostOf(conn); if (room) addBot(room); },
@@ -808,6 +830,14 @@ const handlers = {
     if (chair.kind === 'reaction') {
       if (now < chair.goAt) return wrongAnswer(room, p, i); // false start
       return void claimChair(room, p, i);
+    }
+    if (chair.kind === 'stopwatch') { // first tap starts the clock, second stops it; within ±0.15 s wins
+      const started = chair.sw.get(p.id);
+      if (!started) { chair.sw.set(p.id, now); return; }
+      chair.sw.delete(p.id);
+      const dt = now - started, ok = Math.abs(dt - chair.target) <= 150;
+      if (p.conn) p.conn.send({ t: 'sw', chair: i, dt, ok });
+      return ok ? void claimChair(room, p, i) : wrongAnswer(room, p, i);
     }
     if (chair.kind === 'mash') {
       let t = chair.taps.get(p.id);

@@ -108,7 +108,7 @@ If your proxy rewrites the `Host` header, set `PUBLIC_ORIGIN=https://sitshow.exa
 - **Player cards**: click any name in a leaderboard or the player list (or 🪪 My card)
   to see level, ranks, stats (shows, wins, win rate, chairs, best streak, fastest seat,
   finals, shows hosted) and achievements.
-- **22 achievements**, from *Opening Night* and *Quick Draw* to *Hat Trick*, *Packed House*
+- **24 achievements**, from *Opening Night* and *Quick Draw* to *Hat Trick*, *Packed House*
   (win with 16+ players) and *Star of the Day*. Unlocks pop up during the show.
 
 ## Hosting a show
@@ -130,10 +130,10 @@ to the original host when they reconnect. Anyone who drops keeps their spot for 
 
 | Group | Challenges |
 | --- | --- |
-| Brain teasers | quick maths, what comes next, biggest sum, count the emoji |
-| Word games | unscramble, type it backwards, missing vowels, spot the correct spelling, speed typing |
-| Sharp eyes | odd one out, ink colour (Stroop), odd-shade tile, tap 1–12 in order |
-| Action games | reaction (wait for green), button mash, memory sequence |
+| Brain teasers | quick maths, what comes next, biggest sum, count the emoji, emoji maths, Roman numerals, add up the dice |
+| Word games | unscramble, type it backwards, missing vowels, spot the correct spelling, speed typing, rhymes, finish the compound word |
+| Sharp eyes | odd one out, ink colour (Stroop), odd-shade tile, tap 1–12 in order, spot the difference, read the clock |
+| Action games | reaction (wait for green), button mash, memory sequence, Simon says, stop the clock at exactly N seconds |
 | Trivia | Geography, Science, Space, Music, Food & Drink, Animals, Sport, General Knowledge — multiple choice and true/false |
 
 ## Features
@@ -158,6 +158,8 @@ to the original host when they reconnect. Anyone who drops keeps their spot for 
   still in the show can read it but can't post until they're out or the show ends. « slides
   it away to a tab on the left (with an unread count); it starts hidden in streamer mode and
   on phones, where it opens as a drawer over the stage.
+- **Mexican wave**: anyone in the green room or the gallery can press 🌊 Wave; when enough
+  of them join within 3 seconds, the crowd and the gallery ripple across the screen.
 - Account holders have a blue ✓ next to their name. Volume starts at 10%.
 
 ## Controls

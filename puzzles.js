@@ -46,6 +46,40 @@ const PHRASES = ['sit down quick', 'musical chairs', 'the music stopped', 'grab 
   'encore encore', 'hold that pose', 'pull up a chair', 'keep on dancing', 'last one standing', 'spin to win',
   'save me a seat', 'the crowd goes wild', 'lights camera action'];
 
+// [target word, the one that rhymes, three that don't]
+const RHYMES = [
+  ['chair', 'bear', 'cheer', 'chain', 'chart'],
+  ['show', 'glow', 'shoe', 'shout', 'cow'],
+  ['seat', 'sheet', 'set', 'sit', 'sweat'],
+  ['dance', 'chance', 'dunce', 'dense', 'danger'],
+  ['clap', 'snap', 'clip', 'clop', 'club'],
+  ['prize', 'surprise', 'press', 'price', 'prism'],
+  ['stage', 'cage', 'stag', 'stagger', 'stack'],
+  ['crowd', 'cloud', 'crown', 'crow', 'cord'],
+  ['light', 'kite', 'lift', 'left', 'lit'],
+  ['star', 'guitar', 'stair', 'store', 'stir'],
+  ['beat', 'treat', 'bet', 'bit', 'boat'],
+  ['song', 'strong', 'sung', 'sign', 'sang'],
+];
+// [first part, the word that completes it, three that don't]
+const COMPOUNDS = [
+  ['FOOT', 'BALL', 'CHAIR', 'CLOUD', 'SPOON'],
+  ['SUN', 'FLOWER', 'TABLE', 'PENCIL', 'CARPET'],
+  ['RAIN', 'BOW', 'FORK', 'CHAIR', 'BOTTLE'],
+  ['TOOTH', 'BRUSH', 'CHAIR', 'LAMP', 'SOCK'],
+  ['ARM', 'CHAIR', 'CLOUD', 'SPOON', 'GRASS'],
+  ['BUTTER', 'FLY', 'CHAIR', 'MOON', 'BRICK'],
+  ['POP', 'CORN', 'STAIR', 'BENCH', 'FLOOR'],
+  ['STAR', 'FISH', 'PILLOW', 'KETTLE', 'SOCK'],
+  ['SNOW', 'MAN', 'CUP', 'DESK', 'FORK'],
+  ['DOOR', 'BELL', 'SPOON', 'GRAPE', 'CLOUD'],
+  ['HIGH', 'CHAIR', 'SPOON', 'CARPET', 'GRAPE'],
+  ['MOON', 'LIGHT', 'FORK', 'BRICK', 'SOCK'],
+];
+const ROMAN = [[1000, 'M'], [900, 'CM'], [500, 'D'], [400, 'CD'], [100, 'C'], [90, 'XC'], [50, 'L'], [40, 'XL'], [10, 'X'], [9, 'IX'], [5, 'V'], [4, 'IV'], [1, 'I']];
+const toRoman = (n) => { let s = ''; for (const [v, r] of ROMAN) while (n >= v) { s += r; n -= v; } return s; };
+const SIMON = 4; // coloured pads
+
 // Trivia: [question, correct, wrong, wrong, wrong]  or  [statement, true|false]
 const TRIVIA = {
   geo: [
@@ -262,6 +296,53 @@ const G = {
     const seq = set.slice(0, len);
     return { pub: { kind: 'memory', title: 'Remember the order, then tap it back', seq, pool: shuffle(set.slice(0, 6)) }, answer: seq.join(',') };
   },
+  emojiMath() { // a little algebra: 🍎 + 🍎 = 10, 🍎 + 🍌 = 8, 🍌 + 🍇 = ?
+    const [a, b, c] = shuffle(pick(EMOJI_SETS)).slice(0, 3);
+    const va = 2 + rnd(9), vb = 1 + rnd(9), vc = 1 + rnd(9);
+    const ans = vb + vc;
+    const opts = new Set([ans]);
+    while (opts.size < 4) { const o = ans + rnd(7) - 3; if (o > 0) opts.add(o); }
+    const prompt = [`${a} + ${a} = ${va * 2}`, `${a} + ${b} = ${va + vb}`, `${c} + ${c} = ${vc * 2}`, `${b} + ${c} = ?`].join('\n');
+    return { pub: { kind: 'choice', title: 'Emoji maths — solve the last line', prompt, multiline: true, choices: shuffle([...opts]).map(String) }, answer: String(ans) };
+  },
+  roman() {
+    const n = 4 + rnd(96);
+    return { pub: { kind: 'type', numeric: true, title: 'Roman numerals — what number is this?', prompt: toRoman(n) }, answer: String(n) };
+  },
+  dice() {
+    const dice = Array.from({ length: 3 + rnd(2) }, () => 1 + rnd(6));
+    return { pub: { kind: 'dice', numeric: true, title: 'Add up the dice!', dice }, answer: String(dice.reduce((x, y) => x + y)) };
+  },
+  rhyme() {
+    const [w, ok, ...bad] = pick(RHYMES);
+    return { pub: { kind: 'choice', title: `Which word rhymes with ${w.toUpperCase()}?`, prompt: '', choices: shuffle([ok, ...bad]) }, answer: ok };
+  },
+  compound() {
+    const [first, ok, ...bad] = pick(COMPOUNDS);
+    return { pub: { kind: 'choice', title: 'Finish the word', prompt: `${first} + ?`, choices: shuffle([ok, ...bad]) }, answer: ok };
+  },
+  spotDiff() { // two 4×4 grids, one cell differs: tap it in the right-hand grid
+    const set = pick(EMOJI_SETS), n = 16, left = Array.from({ length: n }, () => pick(set.slice(0, 5)));
+    const right = left.slice(), i = rnd(n);
+    right[i] = pick(set.filter((e) => e !== left[i]));
+    return { pub: { kind: 'spotdiff', title: 'Spot the difference — tap it on the right', cols: 4, left, right }, answer: String(i) };
+  },
+  clock() {
+    const h = 1 + rnd(12), m = rnd(12) * 5, fmt = (hh, mm) => `${hh}:${String(mm).padStart(2, '0')}`;
+    const opts = new Set([fmt(h, m)]);
+    const near = [[h, (m + 30) % 60], [(h % 12) + 1, m], [h, (m + 15) % 60], [m / 5 || 12, (h % 12) * 5]]; // classic mix-ups
+    for (const [hh, mm] of shuffle(near)) { if (opts.size >= 4) break; opts.add(fmt(hh, mm)); }
+    while (opts.size < 4) opts.add(fmt(1 + rnd(12), rnd(12) * 5));
+    return { pub: { kind: 'clock', title: 'What time does the clock show?', h, m, choices: shuffle([...opts]) }, answer: fmt(h, m) };
+  },
+  simon() {
+    const seq = Array.from({ length: 4 + rnd(2) }, () => rnd(SIMON));
+    return { pub: { kind: 'simon', title: 'Simon says — watch, then repeat', seq }, answer: seq.join(',') };
+  },
+  stopwatch() {
+    const target = (15 + rnd(26)) * 100; // 1.5–4.0 s
+    return { pub: { kind: 'stopwatch', title: `Stop the clock at exactly ${(target / 1000).toFixed(1)} s`, target }, kind: 'stopwatch', target };
+  },
   reaction() {
     return { pub: { kind: 'reaction', title: 'Wait for GREEN… then hit it!' }, kind: 'reaction' };
   },
@@ -273,10 +354,10 @@ const G = {
 
 // Host-selectable groups. Trivia categories share one "trivia" slot so they don't crowd out the rest.
 const GROUPS = [
-  { id: 'brain', name: 'Brain teasers', gens: ['maths', 'sequence', 'biggest', 'count'] },
-  { id: 'words', name: 'Word games', gens: ['unscramble', 'backwards', 'vowels', 'spelling', 'speedType'] },
-  { id: 'eyes', name: 'Sharp eyes', gens: ['oddOne', 'stroop', 'shade', 'hunt'] },
-  { id: 'action', name: 'Action games', gens: ['reaction', 'mash', 'memory'] },
+  { id: 'brain', name: 'Brain teasers', gens: ['maths', 'sequence', 'biggest', 'count', 'emojiMath', 'roman', 'dice'] },
+  { id: 'words', name: 'Word games', gens: ['unscramble', 'backwards', 'vowels', 'spelling', 'speedType', 'rhyme', 'compound'] },
+  { id: 'eyes', name: 'Sharp eyes', gens: ['oddOne', 'stroop', 'shade', 'hunt', 'spotDiff', 'clock'] },
+  { id: 'action', name: 'Action games', gens: ['reaction', 'mash', 'memory', 'simon', 'stopwatch'] },
   { id: 'geo', name: 'Geography', trivia: true },
   { id: 'sci', name: 'Science', trivia: true },
   { id: 'space', name: 'Space', trivia: true },

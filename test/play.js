@@ -33,7 +33,11 @@ function solve(pz) { // answers for every challenge that can be worked out from 
   const p = pz.prompt || '';
   if (pz.kind === 'grid') { const cnt = {}; pz.colors.forEach((c) => (cnt[c] = (cnt[c] || 0) + 1)); return String(pz.colors.findIndex((c) => cnt[c] === 1)); }
   if (pz.kind === 'order') { const o = []; for (let k = 1; k <= pz.nums.length; k++) o.push(pz.nums.indexOf(k)); return o.join(','); }
-  if (pz.kind === 'memory') return pz.seq.join(',');
+  if (pz.kind === 'memory' || pz.kind === 'simon') return pz.seq.join(',');
+  if (pz.kind === 'spotdiff') return String(pz.left.findIndex((x, i) => x !== pz.right[i]));
+  if (pz.kind === 'dice') return String(pz.dice.reduce((a, b) => a + b));
+  if (pz.kind === 'clock') return `${pz.h}:${String(pz.m).padStart(2, '0')}`;
+  if (pz.title.startsWith('Roman')) { const v = { I: 1, V: 5, X: 10, L: 50, C: 100, D: 500, M: 1000 }; let n = 0; for (let i = 0; i < p.length; i++) n += v[p[i]] < (v[p[i + 1]] || 0) ? -v[p[i]] : v[p[i]]; return String(n); }
   if (pz.title === 'Quick maths!') return String(eval(p.replace(' = ?', '').replace(/×/g, '*').replace(/−/g, '-')));
   if (pz.title === 'What comes next?') {
     const s = p.replace(', ?', '').split(', ').map(Number);
@@ -56,7 +60,7 @@ function autoplay(c, stats) {
     const me = m.players.find((p) => p.id === c.me.id);
     if (!me || !me.alive || me.seat != null) return;
     const free = m.chairs.map((ch, i) => [ch, i]).filter(([ch]) => !ch.owner && ch.puzzle);
-    const tapGame = free.find(([ch]) => ch.puzzle.kind === 'reaction' || ch.puzzle.kind === 'mash');
+    const tapGame = free.find(([ch]) => ['reaction', 'mash', 'stopwatch'].includes(ch.puzzle.kind));
     const pickOne = tapGame || free.find(([ch]) => solve(ch.puzzle) != null);
     if (!pickOne) return;
     const [ch, i] = pickOne, pz = ch.puzzle, key = m.round + ':' + i + ':' + (pz.go ? 'go' : '');
@@ -67,6 +71,9 @@ function autoplay(c, stats) {
     if (pz.kind === 'reaction') {
       if (!pz.go) { if (!stats.falseStart) { stats.falseStart = true; c.send({ t: 'tap', chair: i }); } return; }
       setTimeout(() => c.send({ t: 'tap', chair: i }), 2100);
+    } else if (pz.kind === 'stopwatch') {
+      c.send({ t: 'tap', chair: i }); setTimeout(() => c.send({ t: 'tap', chair: i }), pz.target);
+      c.wait((m) => m.t === 'sw', 15000).then((m) => { stats.sw = m; }).catch(() => {});
     } else if (pz.kind === 'mash') {
       let n = 0; const iv = setInterval(() => { if (++n > pz.need + 5 || c.room.phase !== 'scramble') clearInterval(iv); c.send({ t: 'tap', chair: i }); }, 65);
     } else {
@@ -101,7 +108,7 @@ function autoplay(c, stats) {
   // settings: host only, validated
   B.send({ t: 'settings', manual: true });
   A.send({ t: 'settings', category: 'Dubstep', musicMin: 1, musicMax: 4, speed: true, manual: true, scramble: 12,
-    puzzles: { words: false, geo: false, sci: false, space: false, music: false, food: false, sport: false, animals: false } });
+    puzzles: { words: false, geo: false, sci: false, space: false, music: false, food: false, sport: false, animals: false, general: false } });
   const st = (await A.wait((m) => m.t === 'room' && m.settings.category === 'Dubstep')).settings;
   assert.deepEqual([st.musicMin, st.musicMax, st.speed, st.manual, st.scramble], [3, 4, true, true, 12]);
   A.send({ t: 'settings', category: 'Nope' }); A.send({ t: 'settings', song: 'short.mp3' }); // not in Dubstep → ignored
@@ -130,6 +137,12 @@ function autoplay(c, stats) {
   const said = await H.wait((m) => m.t === 'chat' && m.id === B.me.id);
   assert.equal(said.text, 'hello bstudio/b'); assert.equal(said.out, false);
   console.log('green-room chat ok');
+  B.send({ t: 'wave' }); // two people in the green room → one tap is enough
+  await H.wait((m) => m.t === 'wave' && m.ids.includes(B.me.id));
+  await B.wait((m) => m.t === 'achievements' && m.ids.includes('wave'));
+  B.send({ t: 'wave' }); await sleep(300);
+  assert.equal(H.events.filter((m) => m.t === 'wave').length, 1, 'wave cooldown');
+  console.log('mexican wave ok (with cooldown + Make Waves achievement)');
   H.send({ t: 'addBot' }); H.send({ t: 'addBot' });
   await H.wait((m) => m.t === 'room' && m.players.length === 4);
 
@@ -151,7 +164,7 @@ function autoplay(c, stats) {
   const over = await H.wait((m) => m.t === 'room' && m.phase === 'gameover', 300000);
   console.log('winner:', over.standings[0].name, '| order:', over.standings.map((s) => s.name).join(' > '));
   console.log('music seconds:', stats.music.map((x) => (x / 1000).toFixed(1)).join(', '), '| manual pauses:', stats.readies);
-  console.log('challenges played:', [...stats.kinds].join(', '));
+  console.log('challenges played:', [...stats.kinds].join(', '), stats.sw ? `| stopwatch ${stats.sw.dt} ms → ${stats.sw.ok ? 'ok' : 'miss'}` : '');
   assert.ok(stats.music.every((x) => x >= 2900 && x <= 4300), 'music within host range');
   assert.ok(stats.readies >= 1, 'manual mode paused between rounds');
   assert.ok(H.events.some((m) => m.t === 'wrong') || B.events.some((m) => m.t === 'wrong'), 'wrong answers lock');
