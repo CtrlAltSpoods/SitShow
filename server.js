@@ -11,6 +11,8 @@ const crypto = require('crypto');
 const { GROUPS, makePuzzles } = require('./puzzles');
 const { openDb, nameKey } = require('./db');
 const webauthn = require('./webauthn');
+const { ACHIEVEMENTS, catalog: ACH_CATALOG, normStats } = require('./achievements');
+const { execFile } = require('child_process');
 
 const PORT = +process.env.PORT || 3000;
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
@@ -107,9 +109,27 @@ process.on('SIGINT', () => { store.close(); process.exit(0); });
 const profCache = new Map(); // id -> live player row (the object rooms hold on to)
 function loadProf(row) {
   let p = profCache.get(row.id);
-  if (!p) { p = { ...row }; profCache.set(row.id, p); }
+  if (!p) { p = { ...row, stats: normStats(row.stats) }; profCache.set(row.id, p); }
   return p;
 }
+const today = () => new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD in the server's time zone (TZ)
+
+// ── achievements ──
+function award(p, ctx) { // p: a room player or { prof, conn }
+  const prof = p.prof;
+  if (!prof || p.bot) return;
+  if (!prof.achs) prof.achs = new Set(store.achievements(prof.id).map((a) => a.ach_id));
+  const level = levelForXp(prof.xp), got = [];
+  for (const a of ACHIEVEMENTS) {
+    if (prof.achs.has(a.id)) continue;
+    let ok = false;
+    try { ok = a.check(prof.stats, level, ctx); } catch {}
+    if (ok && store.unlock(prof.id, a.id)) { prof.achs.add(a.id); got.push(a.id); }
+  }
+  const conn = p.conn || byPid.get(prof.id);
+  if (got.length && conn) conn.send({ t: 'achievements', ids: got });
+}
+function bump(p, fn) { if (!p || p.bot || !p.prof) return; fn(p.prof.stats); saveProf(p.prof); }
 function saveProf(p) { try { store.save(p); } catch (e) { console.warn('Could not save player', p.id, e.message); } }
 
 // Account names are reserved; bot names belong to the studio.
@@ -182,6 +202,61 @@ function musicInfo() {
     thinking: all.filter((s) => THINKING_RE.test(songCat(s))),
   };
 }
+
+// ── loudness: measure each track once with ffmpeg (if installed) and let clients even out the volume ──
+const TARGET_LUFS = -16;
+let ffmpegOk = false;
+const gainQueue = [], gainQueued = new Set();
+let gainBusy = false;
+const songStat = (rel) => { try { return fs.statSync(path.join(MUSIC_DIR, rel)); } catch { return null; } };
+function gainFor(rel) { // dB to apply, or null while it's still being measured
+  const st = songStat(rel); if (!st) return null;
+  const row = store.gain(rel);
+  if (row && row.size === st.size && row.mtime === Math.floor(st.mtimeMs)) return row.gain;
+  queueGain(rel, true);
+  return null;
+}
+function queueGain(rel, urgent) {
+  if (!ffmpegOk) return;
+  if (gainQueued.has(rel)) { if (urgent) { const i = gainQueue.indexOf(rel); if (i > 0) { gainQueue.splice(i, 1); gainQueue.unshift(rel); } } return; }
+  gainQueued.add(rel);
+  if (urgent) gainQueue.unshift(rel); else gainQueue.push(rel);
+  pumpGain();
+}
+function queueAllGains() {
+  if (!ffmpegOk) return;
+  for (const rel of listSongs()) {
+    const st = songStat(rel), row = store.gain(rel);
+    if (st && !(row && row.size === st.size && row.mtime === Math.floor(st.mtimeMs))) queueGain(rel);
+  }
+}
+function measureLoudness(file, from, cb) { // integrated loudness (LUFS) of the minute of the track that gets played
+  execFile('ffmpeg', ['-hide_banner', '-nostats', '-ss', String(from), '-t', '60', '-i', file, '-vn', '-af', 'loudnorm=print_format=json', '-f', 'null', '-'],
+    { timeout: 120000, maxBuffer: 8 << 20 }, (e, out, err) => {
+      const m = /"input_i"\s*:\s*"(-?[\d.]+|-inf)"/.exec(err || '');
+      cb(m && m[1] !== '-inf' ? parseFloat(m[1]) : null);
+    });
+}
+function pumpGain() {
+  if (gainBusy || !gainQueue.length) return;
+  gainBusy = true;
+  const rel = gainQueue.shift(), st = songStat(rel), file = path.join(MUSIC_DIR, rel);
+  const done = (lufs) => {
+    if (st) {
+      const gain = lufs == null ? 0 : Math.round(Math.max(-15, Math.min(8, TARGET_LUFS - lufs)) * 10) / 10;
+      try { store.setGain(rel, st.size, Math.floor(st.mtimeMs), lufs, gain); } catch {}
+    }
+    gainQueued.delete(rel); gainBusy = false;
+    setTimeout(pumpGain, 50);
+  };
+  if (!st) return done(null);
+  measureLoudness(file, 25, (l) => (l == null ? measureLoudness(file, 0, done) : done(l))); // short tracks: measure from the start
+}
+execFile('ffmpeg', ['-hide_banner', '-version'], (e) => {
+  ffmpegOk = !e;
+  if (ffmpegOk) { console.log('Evening out music volume with ffmpeg'); queueAllGains(); }
+  else console.log('ffmpeg not found: music volume will not be evened out');
+});
 
 // ───────────────────────────── avatars (memory only, removed 5 min after disconnect) ─────────────────────────────
 const avatars = new Map(); // pid -> { buf, type, hash, timer }
@@ -332,8 +407,11 @@ function resetToLobby(room) {
 function startGame(room) {
   if (room.phase !== 'lobby' || room.players.size < 2) return;
   room.outOrder = []; room.winner = null; room.standings = null; room.round = 0; room.lastSong = null;
-  for (const p of room.players.values()) { p.inGame = true; p.alive = true; p.seats = 0; }
+  for (const p of room.players.values()) { p.inGame = true; p.alive = true; p.seats = 0; p.wrongs = 0; p.final = false; }
+  room.field = room.players.size;
   resetSeats(room);
+  const host = room.players.get(room.hostId);
+  if (host) { bump(host, (st) => st.hosted++); award(host); }
   pushLobby();
   beginRound(room);
 }
@@ -353,6 +431,7 @@ function beginRound(room) {
   resetSeats(room);
   // big shows lose about a sixth of the field per round, so 30 players still finish in ~12 rounds
   const drop = alive.length >= 8 ? Math.max(2, Math.round(alive.length / 6)) : 1;
+  if (alive.length === 2) for (const p of alive) p.final = true;
   room.chairs = Array.from({ length: Math.max(1, alive.length - drop) }, () => ({ owner: null, pub: null, answer: null, kind: 'answer' }));
   room.currentSong = room.lastSong = pickSong(room);
   room.phase = 'intro';
@@ -371,6 +450,7 @@ function startScramble(room) {
   if (room.phase !== 'music') return;
   room.phase = 'scramble';
   const now = Date.now();
+  room.scrambleAt = now;
   const puzzles = makePuzzles(room.chairs.length, room.settings.puzzles, room.usedQ);
   clearChairTimers(room);
   room.chairs.forEach((c, i) => {
@@ -390,12 +470,23 @@ function claimChair(room, p, i) {
   if (!chair || chair.owner || p.seat != null) return false;
   chair.owner = p.id; p.seat = i; p.pick = i; p.seats++;
   sendRoom(room, { t: 'claim', id: p.id, chair: i });
+  if (!p.bot) {
+    const dt = Date.now() - room.scrambleAt, cat = (chair.pub && chair.pub.cat) || '';
+    bump(p, (st) => {
+      st.seats++;
+      if (!st.fastest || dt < st.fastest) st.fastest = dt;
+      if (cat.startsWith('Trivia')) st.trivia++;
+      if (cat === 'Action games') st.action++;
+    });
+    award(p);
+  }
   pushState(room);
   checkScrambleDone(room);
   return true;
 }
 function wrongAnswer(room, p, i) {
   p.lockUntil = Date.now() + WRONG_LOCK;
+  p.wrongs = (p.wrongs || 0) + 1;
   if (p.conn) p.conn.send({ t: 'wrong', lock: WRONG_LOCK, chair: i });
   sendRoom(room, { t: 'miss', id: p.id });
 }
@@ -449,8 +540,19 @@ function endGame(room) {
         if (it.level > before && it.level <= after) unlocked.push({ kind, name: it.name || it.e });
       }
     }
+    const won = winner === p, st = p.prof.stats, day = today();
+    st.games++;
+    if (won) { st.wins++; st.streak++; st.bestStreak = Math.max(st.bestStreak, st.streak); if (!p.wrongs) st.flawless++; }
+    else st.streak = 0;
+    if (p.final) st.finals++;
+    try {
+      store.addScore(p.prof.id, day, gained, won);
+      const row = store.dayRow(p.prof.id, day);
+      if (row && store.rankDay(day, row.points) === 1) st.topDay++;
+    } catch (e) { console.warn('score save failed', e.message); }
     saveProf(p.prof);
     if (p.conn) p.conn.send({ t: 'xp', gained, leveled: after > before, unlocked, me: meInfo(p.conn) });
+    award(p, { won, field: room.field || room.players.size });
   }
   setPhaseTimer(room, T_GAMEOVER, () => resetToLobby(room));
   pushState(room);
@@ -615,8 +717,33 @@ const handlers = {
     if (!it || it.level > levelForXp(conn.prof.xp)) return;
     conn.lastEmote = now;
     sendRoom(room, { t: 'emote', id: conn.pid, e: it.e });
+    const me = { prof: conn.prof, conn };
+    bump(me, (st) => st.emotes++); award(me);
   },
-  songs(conn) { songCache.at = 0; conn.send({ t: 'music', ...musicInfo() }); },
+  songs(conn) { songCache.at = 0; conn.send({ t: 'music', ...musicInfo() }); queueAllGains(); },
+  leaderboard(conn) {
+    const day = today(), me = conn.prof, mine = store.dayRow(me.id, day);
+    conn.send({
+      t: 'leaderboard', day,
+      levels: store.topLevels(25).map((r) => ({ id: r.id, name: r.name, xp: r.xp, level: levelForXp(r.xp), acct: !!r.account })),
+      daily: store.topDay(day, 25).map((r) => ({ id: r.id, name: r.name, points: r.points, wins: r.wins, games: r.games, level: levelForXp(r.xp), acct: !!r.account })),
+      me: { levelRank: me.xp > 0 ? store.rankLevel(me.xp) : null, dayRank: mine ? store.rankDay(day, mine.points) : null, dayPoints: mine ? mine.points : 0 },
+    });
+  },
+  card(conn, m) {
+    const id = String(m.id || '').slice(0, 20);
+    const live = profCache.get(id);
+    const row = live || store.player(id);
+    if (!row) return conn.send({ t: 'card', id, missing: true });
+    const stats = live ? live.stats : normStats(row.stats);
+    const day = today(), d = store.dayRow(id, day);
+    conn.send({
+      t: 'card', id, name: row.name, xp: row.xp, level: levelForXp(row.xp), acct: !!row.account, created: row.created,
+      dance: row.dance, death: row.death, ring: row.ring, av: avatars.get(id)?.hash || null, online: byPid.has(id),
+      stats, achievements: store.achievements(id), levelRank: row.xp > 0 ? store.rankLevel(row.xp) : null,
+      today: d ? { ...d, rank: store.rankDay(day, d.points) } : null,
+    });
+  },
 
   // ── host controls ──
   settings(conn, m) { const room = hostOf(conn); if (room) { applySettings(room, m); pushState(room); } },
@@ -704,7 +831,7 @@ function onMessage(conn, text) {
     byPid.set(pid, conn);
     const av = avatars.get(pid);
     if (av) clearTimeout(av.timer); // reconnected inside the grace period
-    conn.send({ t: 'welcome', me: meInfo(conn), catalog: CATALOG, groups: GROUPS, music: musicInfo() });
+    conn.send({ t: 'welcome', me: meInfo(conn), catalog: CATALOG, groups: GROUPS, music: musicInfo(), achievements: ACH_CATALOG });
     conn.send(lobbyList());
     if (old && old.room && !old.room.dead) {
       const p = old.room.players.get(pid);
@@ -992,7 +1119,8 @@ const server = http.createServer((req, res) => {
   if (pathname.startsWith('/music/')) {
     const name = pathname.slice(7);
     if (!listSongs().includes(name)) { res.writeHead(404); return res.end(); } // only files from the scanned list
-    return serveFile(req, res, path.join(MUSIC_DIR, name), 'audio/mpeg', { 'cache-control': 'public, max-age=3600' });
+    const gain = gainFor(name);
+    return serveFile(req, res, path.join(MUSIC_DIR, name), 'audio/mpeg', { 'cache-control': 'no-cache', 'x-gain-db': gain == null ? 'pending' : String(gain) });
   }
   const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   const file = path.normalize(path.join(PUBLIC_DIR, rel));

@@ -186,6 +186,45 @@ select option { color: #111; }
 .acct .hint { margin: 0; }
 .players .acct-tick { color: var(--teal); font-size: .75rem; margin-left: 3px; }
 
+/* leaderboards */
+.board-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; background: rgba(0,0,0,.35); border-radius: 12px; padding: 4px; margin-bottom: 10px; }
+.board-tabs button { border: 0; background: none; border-radius: 9px; padding: 7px; font-family: var(--display); font-size: .8rem; cursor: pointer; color: var(--cream); }
+.board-tabs button.on { background: var(--gold); color: var(--ink); }
+.board-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; max-height: 340px; overflow: auto; }
+.board-list li { display: flex; align-items: center; gap: 9px; background: rgba(0,0,0,.25); border-radius: 10px; padding: 6px 10px; cursor: pointer; }
+.board-list li:hover { background: rgba(255,255,255,.08); }
+.board-list li.me { box-shadow: inset 0 0 0 2px var(--gold); }
+.board-list .rk { width: 2.1em; text-align: center; font-family: var(--display); font-size: .85rem; opacity: .85; flex: none; }
+.board-list .avatar { width: 28px; height: 28px; border-width: 2px; font-size: 13px; }
+.board-list .bn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.board-list .bv { font-family: var(--display); font-size: .85rem; color: var(--gold); white-space: nowrap; }
+.board-list .bv small { color: var(--cream); opacity: .6; font-family: var(--body); font-size: .7rem; margin-left: 4px; }
+.board-foot { font-size: .8rem; opacity: .75; margin-top: 8px; text-align: center; }
+
+/* player card */
+.player-card { width: min(640px, 100%); background: radial-gradient(ellipse at 50% 0%, #6a2a8f, #220b3d 70%); }
+.pc-head { display: flex; gap: 16px; align-items: center; }
+.pc-head .avatar { width: 96px; height: 96px; font-size: 44px; border-width: 4px; box-shadow: 0 0 0 4px var(--gold), 0 8px 24px #000; }
+.pc-name { font-family: var(--display); font-size: 1.7rem; line-height: 1.1; color: var(--gold); overflow-wrap: anywhere; }
+.pc-sub { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; font-size: .8rem; }
+.pc-pill { background: rgba(0,0,0,.35); border-radius: 99px; padding: 2px 9px; }
+.pc-pill.on { background: #1d8a5a; }
+.pc-ranks { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 14px 0; }
+.pc-rank { background: rgba(0,0,0,.3); border-radius: 12px; padding: 8px 12px; }
+.pc-rank b { display: block; font-family: var(--display); font-size: 1.3rem; color: var(--gold); }
+.pc-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.pc-stat { background: rgba(0,0,0,.25); border-radius: 12px; padding: 8px; text-align: center; }
+.pc-stat b { display: block; font-family: var(--display); font-size: 1.25rem; }
+.pc-stat span { font-size: .7rem; opacity: .75; text-transform: uppercase; letter-spacing: .08em; }
+.pc-ach-h { display: flex; justify-content: space-between; margin: 16px 0 8px; font-size: .85rem; color: var(--gold); font-family: var(--display); }
+.pc-achs { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 7px; }
+.pc-ach { background: rgba(0,0,0,.3); border: 2px solid rgba(255,200,61,.5); border-radius: 12px; padding: 7px; text-align: center; font-size: .72rem; line-height: 1.2; }
+.pc-ach i { display: block; font-style: normal; font-size: 1.6rem; margin-bottom: 2px; }
+.pc-ach b { display: block; font-size: .78rem; }
+.pc-ach.locked { border-color: rgba(255,255,255,.1); opacity: .4; filter: grayscale(1); }
+.players .pn.clickable { cursor: pointer; }
+.players .pn.clickable:hover { text-decoration: underline; }
+
 /* invite landing */
 #invite { min-height: 100dvh; display: grid; place-items: center; padding: 20px; }
 .invite-card { width: min(460px, 100%); text-align: center; box-shadow: 0 0 0 4px var(--gold), 0 20px 60px #000; }
@@ -340,6 +379,7 @@ select option { color: #111; }
   .side { border-left: 0; border-top: 3px solid rgba(255,200,61,.4); max-height: 30dvh; }
   .keys, .vol { display: none; }
   .wardrobe { grid-template-columns: 1fr; }
+  .pc-stats { grid-template-columns: repeat(2, 1fr); }
   .wardrobe-preview { display: flex; flex-direction: column; align-items: center; }
   .emote-bar { max-width: calc(100% - 80px); bottom: auto; top: 8px; }
   .emote-bar button { width: 34px; height: 34px; font-size: 17px; }

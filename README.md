@@ -52,6 +52,14 @@ music/
 └── loose.mp3         → category "Unsorted"
 ```
 
+**Volume is evened out automatically.** The server measures each track's loudness once
+with ffmpeg (included in the Docker image) and every player's browser turns loud tracks
+down and quiet ones up, with a limiter so nothing clips. Results are cached in the
+database; new or changed files are measured in the background.
+
+**The stage reacts to the bass**: the floor flashes and pulses, the lights and bulbs punch
+and the crowd bounces on the beat, and the screen beside the stage shows the live spectrum.
+
 There's never dead air: between rounds a built-in game-show vamp plays, and while players
 are solving a built-in ticking "thinking" loop plays (it speeds up in the last 5 seconds).
 Put tracks in `Intro Music` / `Thinking Music` to use your own instead — those two folders
@@ -86,6 +94,18 @@ Show behind a reverse proxy (Nginx Proxy Manager, SWAG, Caddy, a Cloudflare Tunn
 something like `https://sitshow.example.com`, with WebSockets enabled. Everything else
 works without HTTPS; the account buttons just explain why they're unavailable.
 If your proxy rewrites the `Host` header, set `PUBLIC_ORIGIN=https://sitshow.example.com`.
+
+## Leaderboards, player cards and achievements
+
+- **Leaderboards** (home page, and 🏆 in a show): **Levels** (all-time XP) and **Today**
+  (points from today's shows: 15 per show, 12 per chair, 50 for a win). Today's board
+  resets at midnight in the server's time zone (the container's `TZ` setting).
+- Both boards are stored by **player ID**, so renamed players show their current name.
+- **Player cards**: click any name in a leaderboard or the player list (or 🪪 My card)
+  to see level, ranks, stats (shows, wins, win rate, chairs, best streak, fastest seat,
+  finals, shows hosted) and achievements.
+- **22 achievements**, from *Opening Night* and *Quick Draw* to *Hat Trick*, *Packed House*
+  (win with 16+ players) and *Star of the Day*. Unlocks pop up during the show.
 
 ## Hosting a show
 
@@ -128,7 +148,8 @@ to the original host when they reconnect. Anyone who drops keeps their spot for 
   home page and behind 🎭 in a show; you can preview locked items.
 - Up to **30 players** per show (bots included). Big shows use two rings of chairs and
   knock out about a sixth of the field each round, so a full studio finishes in ~12 rounds.
-- Late joiners watch from the audience. Volume starts at 10%.
+- Late joiners and eliminated players watch from the audience until the next show.
+  Volume starts at 10%.
 
 ## Controls
 
@@ -162,6 +183,6 @@ In Docker the server starts as root only to fix ownership of `/data`, then runs 
 ## Test
 
 `BASE=localhost:3000 node test/accounts.js` exercises accounts with a software passkey
-(server on `localhost`).
+(server on `localhost`, with a fresh data folder — it reserves the name "Jake").
 
 `BASE=localhost:3000 node test/play.js` runs a scripted two-player + bots game against a running server (Node 22+). It expects a `Dubstep` folder with at least one MP3 in the music folder.

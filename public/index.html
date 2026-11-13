@@ -43,6 +43,7 @@
       <div class="row">
         <label class="switch"><input type="checkbox" data-streamer><span></span> 🎥 Streamer mode</label>
         <button class="btn small ghost" data-avatar-remove hidden>Remove photo</button>
+        <button class="btn small ghost" id="myCardBtn">🪪 My card</button>
       </div>
       <p class="hint">Streamer mode plays only stream-safe music on your screen and hides room codes.</p>
 
@@ -84,6 +85,11 @@
           <input id="codeInput" maxlength="6" placeholder="Invite code" spellcheck="false" autocapitalize="characters" aria-label="Invite code">
           <button class="btn" type="submit">Join</button>
         </form>
+      </section>
+
+      <section class="card" aria-labelledby="h-board">
+        <h2 id="h-board">🏆 Leaderboards</h2>
+        <div class="board"></div>
       </section>
     </div>
   </div>
@@ -129,6 +135,7 @@
     <div class="top-actions">
       <button class="btn small" id="inviteBtn">🔗 Copy invite</button>
       <button class="btn small ghost" id="invitePwBtn" hidden title="Copies a link that includes the password">🔗 + password</button>
+      <button class="btn small ghost" id="boardBtn" title="Leaderboards">🏆</button>
       <label class="switch compact" title="Streamer mode: stream-safe music and hidden room codes"><input type="checkbox" data-streamer><span></span> 🎥</label>
       <label class="vol" title="Volume">🔊<input id="volume" type="range" min="0" max="100" value="10" aria-label="Volume"></label>
       <button class="btn small ghost" id="leaveBtn">Leave</button>
@@ -199,6 +206,20 @@
       </div>
       <div class="wardrobe-lists"></div>
     </div>
+  </div>
+</div>
+
+<div class="modal" id="boardModal" hidden>
+  <div class="modal-card">
+    <div class="row between"><h2>🏆 Leaderboards</h2><button class="btn small ghost" data-close>Close</button></div>
+    <div class="board"></div>
+  </div>
+</div>
+
+<div class="modal" id="cardModal" hidden>
+  <div class="modal-card wide player-card">
+    <div class="row end"><button class="btn small ghost" data-close>Close</button></div>
+    <div id="cardBody"></div>
   </div>
 </div>
 

@@ -63,7 +63,26 @@ function openDb(file, legacyJson) {
     );
     CREATE INDEX IF NOT EXISTS credentials_player ON credentials(player_id);
     CREATE TABLE IF NOT EXISTS legacy_profiles (key TEXT PRIMARY KEY, data TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS daily_scores (
+      player_id TEXT NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+      day       TEXT NOT NULL,
+      points    INTEGER NOT NULL DEFAULT 0,
+      wins      INTEGER NOT NULL DEFAULT 0,
+      games     INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (player_id, day)
+    );
+    CREATE INDEX IF NOT EXISTS daily_scores_day ON daily_scores(day, points DESC);
+    CREATE TABLE IF NOT EXISTS achievements (
+      player_id TEXT NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+      ach_id    TEXT NOT NULL,
+      at        INTEGER NOT NULL,
+      PRIMARY KEY (player_id, ach_id)
+    );
+    CREATE TABLE IF NOT EXISTS music_gain (path TEXT PRIMARY KEY, size INTEGER, mtime INTEGER, lufs REAL, gain REAL);
   `);
+  // columns added after the first release
+  const cols = new Set(db.prepare('PRAGMA table_info(players)').all().map((c) => c.name));
+  if (!cols.has('stats')) db.exec("ALTER TABLE players ADD COLUMN stats TEXT NOT NULL DEFAULT '{}'");
 
   // one-time import of the old profiles.json (rows are claimed when that browser next connects)
   if (legacyJson && fs.existsSync(legacyJson)) {
@@ -81,6 +100,7 @@ function openDb(file, legacyJson) {
   const now = () => Date.now();
   // tidy up: guests who never earned anything and haven't been seen for 30 days
   db.prepare('DELETE FROM players WHERE account = 0 AND xp = 0 AND seen < ?').run(now() - 30 * 86400e3);
+  db.prepare('DELETE FROM daily_scores WHERE day < ?').run(new Date(now() - 400 * 86400e3).toISOString().slice(0, 10));
 
   const q = {
     sessionPlayer: db.prepare('SELECT p.* FROM sessions s JOIN players p ON p.id = s.player_id WHERE s.token_hash = ?'),
@@ -90,7 +110,19 @@ function openDb(file, legacyJson) {
     legacy: db.prepare('SELECT data FROM legacy_profiles WHERE key = ?'),
     delLegacy: db.prepare('DELETE FROM legacy_profiles WHERE key = ?'),
     addPlayer: db.prepare('INSERT INTO players (id, name, xp, dance, death, ring, created, seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'),
-    savePlayer: db.prepare('UPDATE players SET name = ?, xp = ?, dance = ?, death = ?, ring = ?, seen = ? WHERE id = ?'),
+    savePlayer: db.prepare('UPDATE players SET name = ?, xp = ?, dance = ?, death = ?, ring = ?, stats = ?, seen = ? WHERE id = ?'),
+    addScore: db.prepare(`INSERT INTO daily_scores (player_id, day, points, wins, games) VALUES (?, ?, ?, ?, 1)
+      ON CONFLICT (player_id, day) DO UPDATE SET points = points + excluded.points, wins = wins + excluded.wins, games = games + 1`),
+    topLevels: db.prepare('SELECT id, name, xp, account FROM players WHERE xp > 0 ORDER BY xp DESC, created ASC LIMIT ?'),
+    rankLevel: db.prepare('SELECT COUNT(*) + 1 AS r FROM players WHERE xp > ?'),
+    topDay: db.prepare(`SELECT s.player_id AS id, p.name, p.account, p.xp, s.points, s.wins, s.games FROM daily_scores s
+      JOIN players p ON p.id = s.player_id WHERE s.day = ? ORDER BY s.points DESC, s.wins DESC LIMIT ?`),
+    dayRow: db.prepare('SELECT points, wins, games FROM daily_scores WHERE player_id = ? AND day = ?'),
+    rankDay: db.prepare('SELECT COUNT(*) + 1 AS r FROM daily_scores WHERE day = ? AND points > ?'),
+    achs: db.prepare('SELECT ach_id, at FROM achievements WHERE player_id = ? ORDER BY at'),
+    unlock: db.prepare('INSERT OR IGNORE INTO achievements (player_id, ach_id, at) VALUES (?, ?, ?)'),
+    gainGet: db.prepare('SELECT * FROM music_gain WHERE path = ?'),
+    gainSet: db.prepare('INSERT OR REPLACE INTO music_gain (path, size, mtime, lufs, gain) VALUES (?, ?, ?, ?, ?)'),
     setAccount: db.prepare('UPDATE players SET account = 1, name_key = ? WHERE id = ?'),
     setNameKey: db.prepare('UPDATE players SET name_key = ? WHERE id = ?'),
     nameOwner: db.prepare('SELECT id FROM players WHERE name_key = ?'),
@@ -124,7 +156,17 @@ function openDb(file, legacyJson) {
       return token;
     },
     endSession(token) { q.delSession.run(tokenHash(token)); },
-    save(p) { q.savePlayer.run(p.name, p.xp, p.dance, p.death, p.ring, now(), p.id); },
+    save(p) { q.savePlayer.run(p.name, p.xp, p.dance, p.death, p.ring, JSON.stringify(p.stats || {}), now(), p.id); },
+    addScore(id, day, points, won) { q.addScore.run(id, day, points, won ? 1 : 0); },
+    topLevels(n) { return q.topLevels.all(n); },
+    rankLevel(xp) { return q.rankLevel.get(xp).r; },
+    topDay(day, n) { return q.topDay.all(day, n); },
+    dayRow(id, day) { return q.dayRow.get(id, day) || null; },
+    rankDay(day, points) { return q.rankDay.get(day, points).r; },
+    achievements(id) { return q.achs.all(id); },
+    unlock(id, ach) { return q.unlock.run(id, ach, now()).changes > 0; },
+    gain(path) { return q.gainGet.get(path) || null; },
+    setGain(path, size, mtime, lufs, gain) { q.gainSet.run(path, size, mtime, lufs, gain); },
     player(id) { return q.player.get(id); },
     nameOwner(key) { return key ? q.nameOwner.get(key)?.id || null : null; },
     /** Reserve `key` for an account. Returns false if another player holds it. */

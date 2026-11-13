@@ -79,7 +79,8 @@ function connect() {
 const on = {
   replaced() { replaced = true; Snd.stop(); $('replaced').hidden = false; },
   welcome(m) {
-    S.me = m.me; S.catalog = m.catalog; S.groups = m.groups; S.music = m.music;
+    S.me = m.me; S.catalog = m.catalog; S.groups = m.groups; S.music = m.music; S.achs = m.achievements || [];
+    send({ t: 'leaderboard' });
     $('reconnect').hidden = true;
     renderMe(); syncAvatar(); hostKey = '';
     if (!wantRoom) return show('home');
@@ -87,6 +88,15 @@ const on = {
     else send({ t: 'peek', code: wantRoom });
   },
   me(m) { S.me = m.me; renderMe(); },
+  leaderboard(m) { S.board = m; renderBoards(); },
+  card(m) { if (m.id === S.cardId) renderCard(m); },
+  achievements(m) {
+    for (const id of m.ids) {
+      const a = S.achs.find((x) => x.id === id); if (!a) continue;
+      toast(el('div', null, el('b', { text: `🏅 Achievement unlocked: ${a.icon} ${a.name}` }), el('div', { text: a.desc })), 'good', 6500);
+    }
+    Snd.sfx('level');
+  },
   nameTaken(m) {
     const msg = `"${m.name}" is reserved by another player — pick a different name.`;
     toast(msg);
@@ -183,7 +193,7 @@ function show(id) {
   for (const s of ['home', 'invite', 'room']) $(s).hidden = s !== id;
   if (id === 'room') { if (!roomShown) { roomShown = true; hostKey = ''; pzKey = ''; resize(); } }
   else { roomShown = false; document.title = 'Sit Show — Musical Chairs Royale'; }
-  if (id === 'home') renderWardrobe();
+  if (id === 'home') { renderWardrobe(); if (S.me) send({ t: 'leaderboard' }); }
 }
 let roomShown = false;
 function openModal(id) { $(id).hidden = false; }
@@ -439,22 +449,38 @@ for (const b of $$('[data-avatar-remove]')) b.addEventListener('click', () => {
 // (pre-round vamp / guessing-time ticker, or MP3s from the Intro Music / Thinking Music folders),
 // and sound effects. Synth music is generated here, so it's always stream safe.
 const Snd = (() => {
-  let ac = null, master = null, gen = 0, seq = null, bed = { kind: null, file: null }, wantBed = null;
+  let ac = null, master = null, bus = null, analyser = null, spec = null, cur = null, gen = 0, seq = null, bed = { kind: null, file: null }, wantBed = null;
+  const trims = {}; // element -> GainNode applying the track's loudness correction
+  const gains = new Map(); // file -> dB (from the server's loudness analysis)
   let vol = +(LS.get('sitshow.vol') ?? 10) / 100;
   let urgency = 0;
   const music = new Audio(); music.preload = 'auto'; music.loop = true; music.volume = vol;
   const bgm = new Audio(); bgm.preload = 'auto'; bgm.loop = true; bgm.volume = vol;
   function unlock() {
     if (ac) { if (ac.state === 'suspended') ac.resume(); return; }
-    try { ac = new (window.AudioContext || window.webkitAudioContext)(); master = ac.createGain(); master.gain.value = vol; master.connect(ac.destination); } catch { return; }
+    try {
+      ac = new (window.AudioContext || window.webkitAudioContext)();
+      master = ac.createGain(); master.gain.value = vol; master.connect(ac.destination);
+      // music path: tracks → bus → limiter (so boosted quiet tracks can't clip) → analyser (beat effects) → master
+      bus = ac.createGain();
+      const lim = ac.createDynamicsCompressor();
+      lim.threshold.value = -3; lim.knee.value = 0; lim.ratio.value = 20; lim.attack.value = 0.002; lim.release.value = 0.2;
+      analyser = ac.createAnalyser(); analyser.fftSize = 1024; analyser.smoothingTimeConstant = 0.45;
+      spec = new Uint8Array(analyser.frequencyBinCount);
+      bus.connect(lim).connect(analyser).connect(master);
+      for (const [name, el] of [['music', music], ['bgm', bgm]]) {
+        const tg = ac.createGain(); ac.createMediaElementSource(el).connect(tg).connect(bus);
+        trims[name] = tg; el.volume = 1;
+      }
+    } catch { return; }
     if (wantBed) { const w = wantBed; wantBed = null; startBed(w.kind, w.file, true); } // the bed asked for before the first click
   }
   function tone(f, t0, dur, type = 'sine', g = 0.2, slideTo) {
-    const o = ac.createOscillator(), a = ac.createGain();
+    const o = ac.createOscillator(), a = ac.createGain(), out = cur || master;
     o.type = type; o.frequency.setValueAtTime(f, t0);
     if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
     a.gain.setValueAtTime(0.0001, t0); a.gain.exponentialRampToValueAtTime(g, t0 + 0.012); a.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-    o.connect(a).connect(master); o.start(t0); o.stop(t0 + dur + 0.03);
+    o.connect(a).connect(out); o.start(t0); o.stop(t0 + dur + 0.03);
   }
   function noise(t0, dur, f0, f1, g = 0.3) {
     const len = Math.max(1, Math.floor(ac.sampleRate * dur)), buf = ac.createBuffer(1, len, ac.sampleRate), d = buf.getChannelData(0);
@@ -463,7 +489,7 @@ const Snd = (() => {
     const flt = ac.createBiquadFilter(); flt.type = 'bandpass'; flt.Q.value = 1.2;
     flt.frequency.setValueAtTime(f0, t0); flt.frequency.exponentialRampToValueAtTime(f1, t0 + dur);
     const a = ac.createGain(); a.gain.setValueAtTime(g, t0); a.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-    s.connect(flt).connect(a).connect(master); s.start(t0);
+    s.connect(flt).connect(a).connect(cur || master); s.start(t0);
   }
   const FX = {
     blip: (t) => tone(880, t, 0.08, 'triangle', 0.08, 1320),
@@ -486,7 +512,8 @@ const Snd = (() => {
     stopSeq(); if (!ac) return;
     const s = { step: 0, next: ac.currentTime + 0.06 };
     s.timer = setInterval(() => {
-      while (s.next < ac.currentTime + 0.25) { fn(s.step, s.next); s.step++; s.next += stepLen(); }
+      cur = bus; // synth music goes through the music bus too, so it drives the beat effects
+      try { while (s.next < ac.currentTime + 0.25) { fn(s.step, s.next); s.step++; s.next += stepLen(); } } finally { cur = null; }
     }, 50);
     seq = s;
   }
@@ -532,9 +559,29 @@ const Snd = (() => {
   };
 
   function srcFor(file) { return '/music/' + file.split('/').map(encodeURIComponent).join('/'); }
+  const elVol = () => (ac ? 1 : vol); // once Web Audio is running, volume is applied by the master gain
+  function applyGain(which, file) {
+    const tg = trims[which]; if (!tg || !file) return;
+    const db = gains.get(file) || 0;
+    tg.gain.setTargetAtTime(10 ** (db / 20), ac.currentTime, 0.15);
+  }
+  function fetchGain(file, tries = 0) { // the server measures loudness once per track and sends the correction as a header
+    if (!file || (gains.has(file) && tries === 0)) return;
+    fetch(srcFor(file), { method: 'HEAD' }).then((r) => {
+      const v = r.headers.get('x-gain-db');
+      if (v === 'pending') { if (tries < 6) setTimeout(() => fetchGain(file, tries + 1), 3000); return; }
+      const db = parseFloat(v);
+      if (Number.isFinite(db)) {
+        gains.set(file, db);
+        if (music.src.endsWith(srcFor(file))) applyGain('music', file);
+        if (bgm.src.endsWith(srcFor(file))) applyGain('bgm', file);
+      }
+    }).catch(() => {});
+  }
   function prep(file) { // preload during the round intro so the music starts on cue
     if (!file) return;
     const s = srcFor(file);
+    fetchGain(file);
     if (!music.src.endsWith(s)) { music.src = s; music.load(); }
   }
   function stopBed() { bed = { kind: null, file: null }; wantBed = null; bgm.pause(); if (seq && seq.bed) stopSeq(); }
@@ -546,7 +593,7 @@ const Snd = (() => {
     if (file) {
       const s = srcFor(file);
       if (!bgm.src.endsWith(s)) { bgm.src = s; } else bgm.currentTime = 0;
-      bgm.volume = vol;
+      bgm.volume = elVol(); fetchGain(file); applyGain('bgm', file);
       bgm.play().catch(() => { if (bed.file === file) { TRACKS[kind](); seq && (seq.bed = true); } });
     } else { TRACKS[kind](); if (seq) seq.bed = true; }
   }
@@ -561,7 +608,7 @@ const Snd = (() => {
       if (isFinite(d) && d < 62) off = clamp(d - 32, 0, 30);
       try { music.currentTime = off + (elapsedMs / 1000) * rate; } catch {}
       music.playbackRate = rate; music.defaultPlaybackRate = rate;
-      music.volume = vol;
+      music.volume = elVol(); applyGain('music', file);
       music.play().catch(() => { if (my === gen) TRACKS.band(rate); });
     };
     music.onerror = () => { if (my === gen) TRACKS.band(rate); };
@@ -572,8 +619,9 @@ const Snd = (() => {
     gen++; music.pause(); stopSeq(); stopBed();
     if (scratch && was) sfx('scratch');
   }
-  function setVol(v) { vol = v; music.volume = v; bgm.volume = v; if (master) master.gain.value = v; LS.set('sitshow.vol', Math.round(v * 100)); }
-  return { unlock, sfx, play, prep, stop, bed: startBed, stopBed, setVol, setUrgency(u) { urgency = u ? 1 : 0; }, get vol() { return vol; }, get bedKind() { return bed.kind; } };
+  function setVol(v) { vol = v; music.volume = bgm.volume = elVol(); if (master) master.gain.value = v; LS.set('sitshow.vol', Math.round(v * 100)); }
+  function spectrum() { if (!analyser || ac.state !== 'running') return null; analyser.getByteFrequencyData(spec); return spec; }
+  return { unlock, sfx, play, prep, stop, bed: startBed, stopBed, setVol, spectrum, setUrgency(u) { urgency = u ? 1 : 0; }, get vol() { return vol; }, get bedKind() { return bed.kind; } };
 })();
 addEventListener('pointerdown', Snd.unlock, { capture: true });
 addEventListener('keydown', Snd.unlock, { capture: true });
@@ -646,6 +694,7 @@ function onPhase(r, prev) {
     case 'gameover':
       Snd.stop(); Snd.sfx('fanfare');
       setTimeout(() => { if (S.room && /gameover|lobby/.test(S.room.phase)) preRoundBed(S.room); }, 2400);
+      setTimeout(() => send({ t: 'leaderboard' }), 1200);
       banner(r.winner ? `🏆 ${nameOf(r, r.winner)} WINS!` : 'NOBODY WINS!', (r.standings || []).slice(1, 3).map((s, i) => `${i + 2}. ${s.name}`).join('  ·  '));
       spawnConfetti();
       break;
@@ -681,7 +730,7 @@ function renderPlayers(r) {
     const av = el('span', { class: 'avatar' }); setAvatarEl(av, p, p.id === S.me.id ? LS.get('sitshow.avatar') : null);
     const canKick = amHost && p.id !== S.me.id && p.id !== r.ownerId;
     ul.append(el('li', { class: (p.id === S.me.id ? 'me ' : '') + (playing && p.inGame && !p.alive ? 'out ' : '') + (p.away ? 'away' : ''), title: p.away ? 'Reconnecting…' : '' },
-      av, el('span', { class: 'pn', text: (p.id === r.hostId ? '👑 ' : '') + p.name }, p.acct && el('span', { class: 'acct-tick', title: 'Registered account', text: '✓' })),
+      av, el('span', { class: 'pn' + (p.bot ? '' : ' clickable'), title: p.bot ? '' : 'View player card', onclick: p.bot ? null : () => openCard(p.id), text: (p.id === r.hostId ? '👑 ' : '') + p.name }, p.acct && el('span', { class: 'acct-tick', title: 'Registered account', text: '✓' })),
       el('span', { class: 'lv', text: 'Lv ' + p.level }), el('span', { text: status }),
       canKick && el('button', { class: 'kick', title: `Remove ${p.name} from the show`, text: '✕', onclick: () => { if (p.bot || confirm(`Remove ${p.name} from the show? They won't be able to rejoin.`)) send({ t: 'kick', id: p.id }); } })));
   }
@@ -704,7 +753,7 @@ function renderHost() {
     box.append(el('h3', { text: 'Tonight\'s show' }),
       el('div', { class: 'now', text: `Host: ${nameOf(r, r.hostId)}${r.ownerId !== r.hostId ? ' (stand-in)' : ''}` }),
       el('div', { class: 'now', text: songLine }),
-      el('div', { class: 'now', text: `Music ${st.musicMin}–${st.musicMax}s${st.speed ? ' · sped up 10%' : ''} · ${st.scramble}s to sit${st.manual ? ' · host starts each round' : ''}` }));
+      st.manual && el('div', { class: 'now', text: 'The host starts each round' }));
     return;
   }
   box.append(el('h3', { text: '👑 Host controls' + (r.ownerId !== S.me.id ? ' (standing in)' : '') }));
@@ -929,6 +978,70 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// ───────────────────────────── leaderboards & player cards ─────────────────────────────
+S.boardTab = LS.get('sitshow.board') || 'levels';
+function renderBoards() { for (const box of $$('.board')) renderBoard(box); }
+function renderBoard(box) {
+  const b = S.board; box.textContent = '';
+  if (!b) { box.append(el('div', { class: 'empty', text: 'Loading…' })); return; }
+  const tab = (id, label) => el('button', { type: 'button', class: S.boardTab === id ? 'on' : '', text: label, onclick: () => { S.boardTab = id; LS.set('sitshow.board', id); renderBoards(); } });
+  box.append(el('div', { class: 'board-tabs' }, tab('levels', '⭐ Levels'), tab('daily', '📅 Today')));
+  const rows = S.boardTab === 'levels' ? b.levels : b.daily;
+  if (!rows.length) { box.append(el('div', { class: 'empty', text: S.boardTab === 'daily' ? 'No scores yet today — play a show to get on the board!' : 'Nobody has earned XP yet.' })); }
+  else {
+    const ul = el('ul', { class: 'board-list' });
+    rows.forEach((row, i) => {
+      const av = el('span', { class: 'avatar' }); setAvatarEl(av, { id: row.id, name: row.name }, row.id === S.me?.id ? LS.get('sitshow.avatar') : null);
+      const val = S.boardTab === 'levels'
+        ? el('span', { class: 'bv', text: 'Lv ' + row.level }, el('small', { text: row.xp + ' XP' }))
+        : el('span', { class: 'bv', text: row.points + ' pts' }, el('small', { text: `${row.wins} win${row.wins === 1 ? '' : 's'}` }));
+      ul.append(el('li', { class: row.id === S.me?.id ? 'me' : '', onclick: () => openCard(row.id), title: 'View player card' },
+        el('span', { class: 'rk', text: ['🥇', '🥈', '🥉'][i] || '#' + (i + 1) }), av,
+        el('span', { class: 'bn', text: row.name }, row.acct && el('span', { class: 'acct-tick', text: ' ✓' })), val));
+    });
+    box.append(ul);
+  }
+  const m = b.me, mine = S.boardTab === 'levels' ? (m.levelRank ? `You're #${m.levelRank} on the level board.` : '') : (m.dayRank ? `You're #${m.dayRank} today with ${m.dayPoints} points.` : 'Play a show to score today.');
+  if (mine) box.append(el('div', { class: 'board-foot', text: mine + (S.boardTab === 'daily' ? ` · Resets daily (${b.day})` : '') }));
+}
+function openCard(id) {
+  S.cardId = id; $('cardBody').textContent = 'Loading…';
+  openModal('cardModal'); send({ t: 'card', id });
+}
+const fmtSecs = (ms) => (ms ? (ms / 1000).toFixed(1) + 's' : '—');
+function renderCard(c) {
+  const body = $('cardBody'); body.textContent = '';
+  if (c.missing) { body.append(el('div', { class: 'empty', text: 'This player no longer exists.' })); return; }
+  const isMe = c.id === S.me.id, st = c.stats || {};
+  const av = el('span', { class: 'avatar' }); setAvatarEl(av, { id: c.id, name: c.name, av: c.av }, isMe ? LS.get('sitshow.avatar') : null);
+  const got = new Map((c.achievements || []).map((a) => [a.ach_id, a.at]));
+  body.append(
+    el('div', { class: 'pc-head' }, av, el('div', null,
+      el('div', { class: 'pc-name', text: c.name }),
+      el('div', { class: 'pc-sub' },
+        el('span', { class: 'lv-badge', text: 'Lv ' + c.level }),
+        el('span', { class: 'pc-pill', text: c.xp + ' XP' }),
+        el('span', { class: 'pc-pill', text: c.acct ? '🔑 Account' : 'Guest' }),
+        c.online && el('span', { class: 'pc-pill on', text: '● Online' }),
+        el('span', { class: 'pc-pill', title: 'Player ID — names can change, this never does', text: 'ID ' + c.id })),
+      el('div', { class: 'pc-sub', text: 'Playing since ' + new Date(c.created).toLocaleDateString() }))),
+    el('div', { class: 'pc-ranks' },
+      el('div', { class: 'pc-rank' }, el('b', { text: c.levelRank ? '#' + c.levelRank : '—' }), 'Level leaderboard'),
+      el('div', { class: 'pc-rank' }, el('b', { text: c.today ? `#${c.today.rank} · ${c.today.points} pts` : '—' }), 'Today')),
+    el('div', { class: 'pc-stats' }, ...[
+      ['Shows', st.games], ['Wins', st.wins], ['Win rate', st.games ? Math.round((st.wins / st.games) * 100) + '%' : '—'], ['Chairs', st.seats],
+      ['Best streak', st.bestStreak], ['Fastest seat', fmtSecs(st.fastest)], ['Finals', st.finals], ['Hosted', st.hosted],
+    ].map(([k, v]) => el('div', { class: 'pc-stat' }, el('b', { text: String(v ?? 0) }), el('span', { text: k })))),
+    el('div', { class: 'pc-ach-h' }, el('span', { text: '🏅 Achievements' }), el('span', { text: `${got.size} / ${S.achs.length}` })),
+    el('div', { class: 'pc-achs' }, ...S.achs.map((a) => el('div', {
+      class: 'pc-ach' + (got.has(a.id) ? '' : ' locked'),
+      title: a.desc + (got.has(a.id) ? ` — unlocked ${new Date(got.get(a.id)).toLocaleDateString()}` : ''),
+    }, el('i', { text: a.icon }), el('b', { text: a.name }), a.desc))));
+}
+$('myCardBtn').addEventListener('click', () => openCard(S.me.id));
+$('boardBtn').addEventListener('click', () => { send({ t: 'leaderboard' }); renderBoards(); openModal('boardModal'); });
+setInterval(() => { if (!$('home').hidden || !$('boardModal').hidden) send({ t: 'leaderboard' }); }, 60000);
+
 // ───────────────────────────── emotes & wardrobe ─────────────────────────────
 let emoteKey = '';
 function renderEmoteBar() {
@@ -986,6 +1099,7 @@ const cv = $('stage'), g = cv.getContext('2d');
 const wrap = $('stageWrap');
 let W = 0, H = 0, DPR = 1, L = { cx: 0, cy: 0, RX: 1, RY: 1, s: 1, vh: 30 }, bgBack = null, bgFloor = null, spin = 0, lastT = performance.now();
 const ents = new Map(); // id -> render entity
+const BEAT = { at: -1e9, avg: 0, hue: 300, pulse: 0, spec: null };
 const confetti = [];
 const imgCache = new Map();
 const DEATH_MS = 2500;
@@ -1022,6 +1136,28 @@ function renderFloor() {
   let gr = b.createLinearGradient(0, cy, 0, H);
   gr.addColorStop(0, 'rgba(10,4,22,0)'); gr.addColorStop(0.35, '#0a0416'); gr.addColorStop(1, '#05020c');
   b.fillStyle = gr; b.fillRect(0, cy, W, H - cy);
+  // what holds it up: steel truss legs on base plates, braced together
+  const legs = [-0.86, -0.6, -0.3, 0, 0.3, 0.6, 0.86], lw = 16 * s, under = (x) => cy + depth + FY * Math.sqrt(Math.max(0, 1 - ((x - cx) / FX) ** 2));
+  b.fillStyle = 'rgba(0,0,0,.45)'; ellipse(b, cx, H - 4, FX * 0.95, 10 * s); b.fill(); // shadow on the ground
+  const tieY = H - 34 * s;
+  b.strokeStyle = '#4a4560'; b.lineWidth = 4 * s;
+  b.beginPath(); b.moveTo(cx + legs[0] * FX, tieY); b.lineTo(cx + legs[legs.length - 1] * FX, tieY); b.stroke();
+  for (let i = 0; i < legs.length - 1; i++) { // diagonal bracing between legs
+    const x0 = cx + legs[i] * FX, x1 = cx + legs[i + 1] * FX;
+    b.strokeStyle = 'rgba(110,104,140,.6)'; b.lineWidth = 2.5 * s;
+    b.beginPath(); b.moveTo(x0, under(x0) - 4); b.lineTo(x1, tieY); b.moveTo(x1, under(x1) - 4); b.lineTo(x0, tieY); b.stroke();
+  }
+  for (const f of legs) {
+    const x = cx + f * FX, top = under(x) - 6, bot = H - 6;
+    const sg = b.createLinearGradient(x - lw / 2, 0, x + lw / 2, 0);
+    sg.addColorStop(0, '#3a3548'); sg.addColorStop(0.5, '#8a84a3'); sg.addColorStop(1, '#2c2838');
+    b.strokeStyle = sg; b.lineWidth = 3 * s;
+    b.beginPath(); b.moveTo(x - lw / 2, top); b.lineTo(x - lw / 2, bot); b.moveTo(x + lw / 2, top); b.lineTo(x + lw / 2, bot); b.stroke();
+    b.lineWidth = 1.5 * s; b.strokeStyle = '#6c6880'; b.beginPath();
+    for (let y = top, k = 0; y < bot; y += lw, k++) { b.moveTo(x - lw / 2, y); b.lineTo(x + lw / 2, Math.min(bot, y + lw)); b.moveTo(x - lw / 2, y); b.lineTo(x + lw / 2, y); }
+    b.stroke();
+    b.fillStyle = '#2a2636'; b.fillRect(x - lw, bot - 3, lw * 2, 6 * s); // base plate
+  }
   // platform front face with panels
   b.save(); ellipse(b, cx, cy + depth, FX, FY); b.clip();
   gr = b.createLinearGradient(0, cy, 0, cy + FY + depth);
@@ -1030,13 +1166,6 @@ function renderFloor() {
   b.strokeStyle = 'rgba(255,200,61,.18)'; b.lineWidth = 1;
   for (let a = 0.08; a < Math.PI; a += 0.16) { const x = cx + Math.cos(a) * FX; b.beginPath(); b.moveTo(x, cy); b.lineTo(x, cy + FY + depth); b.stroke(); }
   b.restore();
-  // footlights along the front
-  for (let a = 0.18; a < Math.PI - 0.1; a += 0.13) {
-    const x = cx + Math.cos(a) * FX * 0.995, y = cy + depth * 0.55 + Math.sin(a) * FY;
-    const lg = b.createRadialGradient(x, y, 0, x, y, 16 * s); lg.addColorStop(0, 'rgba(255,220,140,.55)'); lg.addColorStop(1, 'rgba(255,200,61,0)');
-    b.fillStyle = lg; ellipse(b, x, y, 16 * s, 10 * s); b.fill();
-    b.fillStyle = '#fff1c4'; ellipse(b, x, y, 3 * s, 2 * s); b.fill();
-  }
   // floor
   gr = b.createRadialGradient(cx, cy, 10, cx, cy, RX * 1.25);
   gr.addColorStop(0, '#8436c9'); gr.addColorStop(0.55, '#3c1568'); gr.addColorStop(1, '#170a2c');
@@ -1102,7 +1231,7 @@ function drawTruss(t, r) {
     const aim = Math.atan2(L.cy - ly, L.cx - lx) - Math.PI / 2;
     g.save(); g.translate(lx, ly); g.rotate(aim * 0.6);
     g.fillStyle = '#1d1a26'; rrect(g, -8, -4, 16, 18, 4); g.fill();
-    g.fillStyle = `rgb(${col})`; g.shadowColor = `rgb(${col})`; g.shadowBlur = 14; ellipse(g, 0, 15, 6.5, 3); g.fill();
+    g.fillStyle = `rgb(${col})`; g.shadowColor = `rgb(${col})`; g.shadowBlur = 14 + 26 * BEAT.pulse; ellipse(g, 0, 15, 6.5 + 3 * BEAT.pulse, 3 + 1.5 * BEAT.pulse); g.fill();
     g.restore();
     lamps.push({ x: lx, y: ly + 14, col });
   }
@@ -1115,7 +1244,8 @@ function drawBeams(t, r, lamps) {
   use.forEach((lamp, i) => {
     const ph = i * 2.1, s = L.s;
     const tx = L.cx + Math.sin(t * sp * 0.7 + ph) * L.RX * 0.95, ty = L.cy + Math.cos(t * sp * 0.5 + ph) * L.RY * 0.7;
-    const gr = g.createLinearGradient(lamp.x, lamp.y, tx, ty); gr.addColorStop(0, `rgba(${lamp.col},.32)`); gr.addColorStop(1, `rgba(${lamp.col},.04)`);
+    const boost = 1 + 1.4 * BEAT.pulse;
+    const gr = g.createLinearGradient(lamp.x, lamp.y, tx, ty); gr.addColorStop(0, `rgba(${lamp.col},${0.32 * boost})`); gr.addColorStop(1, `rgba(${lamp.col},${0.04 * boost})`);
     g.fillStyle = gr; g.beginPath(); g.moveTo(lamp.x - 6, lamp.y); g.lineTo(lamp.x + 6, lamp.y); g.lineTo(tx + 70 * s, ty); g.lineTo(tx - 70 * s, ty); g.fill();
     g.fillStyle = `rgba(${lamp.col},.14)`; ellipse(g, tx, ty, 72 * s, 24 * s); g.fill();
   });
@@ -1141,10 +1271,10 @@ function drawScreens(t, r) {
     g.fillStyle = sg; g.fillRect(x, y, w, h);
     const lines = txt();
     g.save(); g.beginPath(); g.rect(x, y, w, h); g.clip();
-    if (!lines) { // equaliser while the music plays
-      const bars = 12, bw = w / bars;
+    if (!lines) { // equaliser while the music plays (real spectrum when Web Audio is running)
+      const bars = 12, bw = w / bars, sp = BEAT.spec;
       for (let i = 0; i < bars; i++) {
-        const v = 0.25 + 0.75 * Math.abs(Math.sin(t * (5 + i * 0.7) + i * 1.7) * Math.sin(t * 2.3 + i));
+        const v = sp ? clamp(sp[Math.round(1.6 ** i)] / 255, 0.04, 1) : 0.25 + 0.75 * Math.abs(Math.sin(t * (5 + i * 0.7) + i * 1.7) * Math.sin(t * 2.3 + i));
         const bh = v * (h - 10);
         const eg = g.createLinearGradient(0, y + h - bh, 0, y + h); eg.addColorStop(0, '#ff3d81'); eg.addColorStop(1, '#ffc83d');
         g.fillStyle = eg; g.fillRect(x + i * bw + 2, y + h - 5 - bh, bw - 4, bh);
@@ -1177,7 +1307,7 @@ function drawAudience(t, r) {
     const spacing = row ? 34 : 30, y = H + (row ? 6 : -10);
     for (let i = 0, x = row ? 4 : -12; x < W + 20; x += spacing, i++) {
       const seed = i * 7.3 + row * 13;
-      const bob = mood === 1 ? Math.abs(Math.sin(t * 4.4 + seed)) * 4 : mood === 2 ? Math.abs(Math.sin(t * 7 + seed)) * 8 : mood === 3 ? Math.sin(t * 20 + seed) * 1.5 : Math.sin(t * 1.3 + seed);
+      const bob = mood === 1 ? Math.abs(Math.sin(t * 4.4 + seed)) * 4 + BEAT.pulse * (4 + sr(seed, 3) * 6) : mood === 2 ? Math.abs(Math.sin(t * 7 + seed)) * 8 : mood === 3 ? Math.sin(t * 20 + seed) * 1.5 : Math.sin(t * 1.3 + seed);
       const hy = y - 26 - bob, sc = 0.9 + sr(seed, 9) * 0.25;
       g.fillStyle = row ? '#0a0414' : '#1e0d36';
       if (mood === 2 && sr(seed, 1) > 0.45) { // arms up!
@@ -1417,20 +1547,39 @@ function frame(now) {
   } else tm.hidden = true;
 
   const idle = r.phase === 'lobby' || r.phase === 'gameover' || r.phase === 'ready';
+  // bass → beat: compare the low end (≈45–190 Hz) with its running average
+  const sp = Snd.spectrum();
+  let bass = 0;
+  if (sp) { for (let i = 1; i <= 4; i++) bass += sp[i]; bass /= 4; }
+  BEAT.avg = BEAT.avg * 0.95 + bass * 0.05;
+  if (sp && bass > 100 && bass > BEAT.avg * 1.18 + 6 && now - BEAT.at > 240) { BEAT.at = now; BEAT.hue = (BEAT.hue + 53) % 360; }
+  const strength = r.phase === 'music' ? 1 : r.phase === 'scramble' ? 0.25 : 0.5;
+  const pulse = Math.exp(-(now - BEAT.at) / 170) * strength;
+  BEAT.pulse = pulse; BEAT.spec = sp;
   if (r.phase === 'music') spin += dt * 0.6 * (r.settings.speed ? 1.1 : 1); else if (idle) spin += dt * 0.14;
 
-  g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const zoom = 1 + 0.014 * pulse; // a little camera kick on each beat
+  g.setTransform(DPR * zoom, 0, 0, DPR * zoom, DPR * (L.cx - L.cx * zoom), DPR * (L.cy - L.cy * zoom));
   g.drawImage(bgBack, 0, 0, W, H);
   drawCurtain(t);
   drawScreens(t, r);
   g.drawImage(bgFloor, 0, 0, W, H);
   const { cx, cy, RX, RY, s } = L;
+  if (pulse > 0.02) { // floor flash + shockwave ring on the beat
+    g.save(); g.globalCompositeOperation = 'lighter';
+    const fg = g.createRadialGradient(cx, cy, 0, cx, cy, RX * 1.2);
+    fg.addColorStop(0, `hsla(${BEAT.hue},95%,62%,${0.32 * pulse})`); fg.addColorStop(1, `hsla(${BEAT.hue},95%,62%,0)`);
+    g.fillStyle = fg; ellipse(g, cx, cy, RX * 1.22, RY * 1.6); g.fill();
+    const k = (now - BEAT.at) / 650;
+    if (k < 1) { g.strokeStyle = `hsla(${BEAT.hue},100%,70%,${(1 - k) * 0.7 * strength})`; g.lineWidth = 3 + 6 * (1 - k); ellipse(g, cx, cy, RX * 1.22 * (0.15 + 0.85 * k), RY * 1.6 * (0.15 + 0.85 * k)); g.stroke(); }
+    g.restore();
+  }
 
   // marquee bulbs around the floor
   const NB = 48, chase = Math.floor(t * (r.phase === 'music' ? 9 : r.phase === 'scramble' ? 14 : 2.5));
   for (let i = 0; i < NB; i++) {
-    const a = (i / NB) * TAU, lit = r.phase === 'scramble' ? (i + chase) % 2 === 0 : (i + chase) % 4 === 0;
-    g.fillStyle = lit ? (r.phase === 'scramble' ? '#ff5a6e' : '#fff3b0') : '#7a5a14';
+    const a = (i / NB) * TAU, flash = pulse > 0.4, lit = flash || (r.phase === 'scramble' ? (i + chase) % 2 === 0 : (i + chase) % 4 === 0);
+    g.fillStyle = flash ? `hsl(${BEAT.hue} 100% ${70 + 20 * pulse}%)` : lit ? (r.phase === 'scramble' ? '#ff5a6e' : '#fff3b0') : '#7a5a14';
     if (lit) { g.shadowColor = g.fillStyle; g.shadowBlur = 12; }
     ellipse(g, cx + Math.cos(a) * RX * 1.22, cy + Math.sin(a) * RY * 1.6, 4.5 * s, 4.5 * s); g.fill(); g.shadowBlur = 0;
   }
@@ -1441,7 +1590,7 @@ function frame(now) {
   drawFog(t);
 
   // where everyone should be
-  const onStage = r.players.filter((p) => (idle ? true : p.inGame && p.alive));
+  const onStage = r.players.filter((p) => (r.phase === 'lobby' ? true : p.inGame && p.alive)); // out = audience until the next show
   const audience = r.players.filter((p) => !onStage.includes(p));
   const nCh = r.chairs.length, items = [], cs = chairScale(nCh);
   const crowd = clamp(1 - (onStage.length - 10) * 0.015, 0.7, 1); // shrink dancers in big shows
@@ -1491,7 +1640,7 @@ function frame(now) {
       continue;
     }
     const moving = e.mode === 'ring' && (idle || r.phase === 'music');
-    const hop = e.claimAt && now - e.claimAt < 500 ? -Math.sin(((now - e.claimAt) / 500) * Math.PI) * 18 * s : 0;
+    const hop = (e.claimAt && now - e.claimAt < 500 ? -Math.sin(((now - e.claimAt) / 500) * Math.PI) * 18 * s : 0) - (moving ? pulse * 7 * s : 0);
     drawAvatar(g, e.x, e.y, e.sc, p, t, { moving, sit: e.mode === 'sit', dy: hop, alpha: p.away ? 0.45 : 1 });
     drawTag(g, e.x, e.y, e.sc, p, isMe);
     if (e.missAt && now - e.missAt < 800) {

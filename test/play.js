@@ -148,6 +148,22 @@ function autoplay(c, stats) {
   assert.ok(H.events.some((m) => m.t === 'wrong') || B.events.some((m) => m.t === 'wrong'), 'wrong answers lock');
   await H.wait((m) => m.t === 'room' && m.phase === 'lobby', 20000);
 
+  // leaderboards, player card and achievements are keyed by player ID
+  H.send({ t: 'leaderboard' });
+  const lb = await H.wait((m) => m.t === 'leaderboard');
+  const mine = lb.daily.find((r) => r.id === H.me.id);
+  assert.ok(mine && mine.points > 0 && mine.games >= 1, 'host is on today\'s board');
+  assert.ok(lb.levels.some((r) => r.id === H.me.id), 'host is on the level board');
+  assert.ok(H.events.some((m) => m.t === 'achievements' && m.ids.includes('first_show')), 'Opening Night unlocked');
+  H.send({ t: 'setName', name: 'Alice Renamed' });
+  await H.wait((m) => m.t === 'me' && m.me.name === 'Alice Renamed');
+  H.send({ t: 'leaderboard' });
+  const lb2 = await H.wait((m) => m.t === 'leaderboard' && m.daily.some((r) => r.id === H.me.id && r.name === 'Alice Renamed'));
+  B.send({ t: 'card', id: H.me.id });
+  const card = await B.wait((m) => m.t === 'card' && m.id === H.me.id);
+  assert.equal(card.name, 'Alice Renamed'); assert.ok(card.stats.games >= 1 && card.stats.hosted >= 1 && card.achievements.length >= 1);
+  console.log('leaderboards + card ok:', `today #${lb2.me.dayRank} (${lb2.me.dayPoints} pts),`, 'achievements:', card.achievements.map((a) => a.ach_id).join(', '));
+
   // skip music + end show
   H.send({ t: 'settings', manual: false, musicMin: 30, musicMax: 30 });
   H.send({ t: 'start' });
