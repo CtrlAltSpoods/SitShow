@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>sitshow</Name>
+  <Repository>ghcr.io/ctrlaltspoods/sitshow:latest</Repository>
+  <Registry>https://github.com/CtrlAltSpoods/SitShow/pkgs/container/sitshow</Registry>
+  <Network>bridge</Network>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/CtrlAltSpoods/SitShow/issues</Support>
+  <Project>https://github.com/CtrlAltSpoods/SitShow</Project>
+  <Overview>Sit Show - Musical Chairs Royale. A multiplayer browser game show: avatars circle the chairs while the music plays, and when it stops each chair goes to whoever solves its mini-puzzle first. Put MP3s in the music folder for the host's song picker.</Overview>
+  <Category>GameServers:</Category>
+  <WebUI>http://[IP]:[PORT:3000]/</WebUI>
+  <Icon>https://raw.githubusercontent.com/CtrlAltSpoods/SitShow/main/public/icon.png</Icon>
+  <ExtraParams/>
+  <Config Name="WebUI Port" Target="3000" Default="3000" Mode="tcp" Description="Port players open in their browser." Type="Port" Display="always" Required="true" Mask="false">3000</Config>
+  <Config Name="Appdata" Target="/data" Default="/mnt/user/appdata/sitshow" Mode="rw" Description="Saved player levels (profiles.json). Also holds the music folder unless you map one below." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/sitshow</Config>
+  <Config Name="Music" Target="/data/music" Default="/mnt/user/appdata/sitshow/music" Mode="ro" Description="Folder of MP3s for the host's song picker. Can point at an existing share." Type="Path" Display="always" Required="false" Mask="false">/mnt/user/appdata/sitshow/music</Config>
+  <Config Name="PUID" Target="PUID" Default="99" Description="User the game runs as (99 = nobody)." Type="Variable" Display="advanced" Required="false" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Description="Group the game runs as (100 = users)." Type="Variable" Display="advanced" Required="false" Mask="false">100</Config>
+</Container>

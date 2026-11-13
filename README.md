@@ -7,16 +7,33 @@ Last one seated wins.
 
 ## Run it
 
+Prebuilt image (amd64 and arm64), published on every push to `main`:
+
 ```bash
-docker compose up -d --build
+docker run -d --name sitshow -p 3000:3000 -v ./data:/data ghcr.io/ctrlaltspoods/sitshow:latest
 # open http://localhost:3000
 ```
 
-Or without Docker (Node 18+, no dependencies to install):
+Or build it yourself with `docker compose up -d --build`, or run it without Docker
+(Node 18+, no dependencies to install): `node server.js`.
 
-```bash
-node server.js
-```
+### Unraid
+
+On the **Docker** tab choose **Add Container** and fill in:
+
+| Field | Value |
+| --- | --- |
+| Name | `sitshow` |
+| Repository | `ghcr.io/ctrlaltspoods/sitshow:latest` |
+| Network Type | `Bridge` |
+| WebUI | `http://[IP]:[PORT:3000]/` |
+| Icon URL | `https://raw.githubusercontent.com/CtrlAltSpoods/SitShow/main/public/icon.png` |
+| Port: container `3000` | host `3000` (or any free port) |
+| Path: container `/data` | `/mnt/user/appdata/sitshow` (read/write) |
+| Path: container `/data/music` *(optional)* | your MP3 folder (read only) |
+
+`PUID`/`PGID` default to `99`/`100` (nobody:users), so no permission changes are needed.
+A ready-made template is in [`unraid/sitshow.xml`](unraid/sitshow.xml).
 
 ## Music
 
@@ -59,11 +76,12 @@ you out for 2 seconds.
 | `DATA_DIR` | `./data` (`/data` in Docker) | Holds `music/` and `profiles.json` (levels) |
 | `MUSIC_DIR` | `$DATA_DIR/music` | Where MP3s are read from |
 | `AVATAR_GRACE_MS` | `300000` | How long an avatar is kept after disconnect |
+| `PUID` / `PGID` | `99` / `100` (Docker) | User and group the server runs as |
 
 Progress is tied to a random ID stored in each player's browser; there are no accounts.
 Behind a reverse proxy, forward WebSocket upgrades for `/ws`.
-If the container can't write `./data/profiles.json` (levels not saving), make the
-folder writable by UID 1000: `sudo chown -R 1000:1000 data`.
+In Docker the server starts as root only to fix ownership of `/data`, then runs as
+`PUID`:`PGID` (default `99`:`100`).
 
 ## Test
 

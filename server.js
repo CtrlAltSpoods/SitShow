@@ -28,6 +28,18 @@ const T_RESULTS = 5200;
 const T_GAMEOVER = 10000;
 const WRONG_LOCK = 2000;
 
+// When started as root (Docker/Unraid), fix ownership of the data folder and drop to PUID/PGID
+// (Unraid's convention is 99:100 = nobody:users), so host-mounted appdata just works.
+if (typeof process.getuid === 'function' && process.getuid() === 0 && process.env.PUID) {
+  const uid = +process.env.PUID, gid = +(process.env.PGID || process.env.PUID);
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
+  try { fs.mkdirSync(MUSIC_DIR, { recursive: true }); } catch {}
+  for (const p of [DATA_DIR, PROFILE_FILE, PROFILE_FILE + '.tmp', MUSIC_DIR]) {
+    try { if (fs.existsSync(p)) fs.chownSync(p, uid, gid); } catch {} // read-only music mounts are fine
+  }
+  try { process.setgid(gid); process.setuid(uid); console.log(`Running as ${uid}:${gid}`); }
+  catch (e) { console.warn('Could not drop privileges:', e.message); }
+}
 try { fs.mkdirSync(MUSIC_DIR, { recursive: true }); } catch (e) { console.warn('Could not create music dir:', e.message); }
 
 // ───────────────────────────── catalog (unlockables) ─────────────────────────────
