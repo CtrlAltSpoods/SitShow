@@ -110,6 +110,8 @@ const on = {
     if (m.member) return joinRoom(m.code);
     showInvite(m);
   },
+  chatHistory(m) { $('chatLog').textContent = ''; chatUnread = 0; for (const c of m.list) addChat(c, true); updateChatBadge(); },
+  chat(m) { addChat(m); },
   joined(m) { wantRoom = m.code; SS.set('sitshow.room', m.code); closeModals(); history.replaceState(null, '', '/?room=' + m.code); },
   left() { leaveLocal(); },
   kicked() { toast('The host removed you from the show.'); leaveLocal(); },
@@ -303,6 +305,7 @@ function applyStreamer() {
 }
 for (const c of $$('[data-streamer]')) c.addEventListener('change', (e) => {
   S.streamer = e.target.checked; LS.set('sitshow.streamer', S.streamer ? '1' : '0');
+  if (S.streamer) setChatOpen(false, false);
   if (S.streamer) toast(S.music.streamSafe.length ? '🎥 Streamer mode on — playing only your "Stream Safe" folder.' : '🎥 Streamer mode on — the built-in House Band will play (add a "Stream Safe" music folder for your own tracks).', 'good', 5000);
   applyStreamer();
 });
@@ -445,11 +448,56 @@ for (const b of $$('[data-avatar-remove]')) b.addEventListener('click', () => {
 });
 
 // ───────────────────────────── audio ─────────────────────────────
+// Onset detector for beat tracking: four filter bands (kick/bass, low-mid, body, click), energy every
+// 256 samples, and how many dB each band jumped (bass weighted most). Heavily compressed masters still
+// show their kicks in the upper bands, and smooth pads produce almost nothing.
+function makeOnsetDetector(sr) {
+  const bq = (type, f, q) => {
+    const w = (2 * Math.PI * f) / sr, al = Math.sin(w) / (2 * q), c = Math.cos(w);
+    let b0, b1, b2;
+    if (type === 'lp') { b0 = (1 - c) / 2; b1 = 1 - c; b2 = b0; } else if (type === 'hp') { b0 = (1 + c) / 2; b1 = -(1 + c); b2 = b0; } else { b0 = al; b1 = 0; b2 = -al; }
+    const a0 = 1 + al;
+    return { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: (-2 * c) / a0, a2: (1 - al) / a0, x1: 0, x2: 0, y1: 0, y2: 0 };
+  };
+  // each band's energy is smoothed over a few cycles of its lowest note so bass ripple isn't mistaken for hits
+  const bands = [
+    { f: [bq('lp', 120, 0.707), bq('lp', 120, 0.707)], w: 3, tau: 0.03 },
+    { f: [bq('bp', 250, 1)], w: 1.5, tau: 0.012 },
+    { f: [bq('bp', 1200, 1)], w: 1, tau: 0.006 },
+    { f: [bq('hp', 3000, 0.707)], w: 0.5, tau: 0.004 },
+  ];
+  for (const b of bands) b.k = 1 - Math.exp(-1 / (b.tau * sr));
+  const ONSET_MARGIN = 2.5; // dB a band must jump within 40 ms to count as a hit
+  const HOP = 256, LAG = Math.max(2, Math.round((0.04 * sr) / HOP)); // compare with ~40 ms ago: a kick's whole rise
+  const acc = new Float64Array(bands.length), hist = bands.map(() => new Float64Array(LAG).fill(-100));
+  let n = 0, h = 0;
+  return (x, t0, emit) => {
+    for (let i = 0; i < x.length; i++) {
+      for (let b = 0; b < bands.length; b++) {
+        let v = x[i];
+        for (const q of bands[b].f) { const y = q.b0 * v + q.b1 * q.x1 + q.b2 * q.x2 - q.a1 * q.y1 - q.a2 * q.y2; q.x2 = q.x1; q.x1 = v; q.y2 = q.y1; q.y1 = y; v = y; }
+        acc[b] += bands[b].k * (v * v - acc[b]); // smoothed energy envelope
+      }
+      if (++n === HOP) {
+        let on = 0, ws = 0;
+        for (let b = 0; b < bands.length; b++) {
+          const db = Math.max(-50, 10 * Math.log10(acc[b] + 1e-10)); // ignore near-silence (encoder noise)
+          on += bands[b].w * Math.max(0, db - hist[b][h] - ONSET_MARGIN); ws += bands[b].w; // small wobbles don't count
+          hist[b][h] = db;
+        }
+        h = (h + 1) % LAG;
+        emit(t0 + ((i + 1) / sr) * 1000, on / ws);
+        n = 0;
+      }
+    }
+  };
+}
+
 // Three layers: the round's MP3 (or the House Band), a "bed" under everything else
 // (pre-round vamp / guessing-time ticker, or MP3s from the Intro Music / Thinking Music folders),
 // and sound effects. Synth music is generated here, so it's always stream safe.
 const Snd = (() => {
-  let ac = null, master = null, bus = null, analyser = null, spec = null, bassAn = null, bassBuf = null, cur = null, gen = 0, seq = null, bed = { kind: null, file: null }, wantBed = null;
+  let ac = null, master = null, bus = null, analyser = null, spec = null, onsetSink = null, cur = null, gen = 0, seq = null, bed = { kind: null, file: null }, wantBed = null;
   const trims = {}; // element -> GainNode applying the track's loudness correction
   const gains = new Map(); // file -> dB (from the server's loudness analysis)
   let vol = +(LS.get('sitshow.vol') ?? 10) / 100;
@@ -469,11 +517,20 @@ const Snd = (() => {
       analyser.minDecibels = -90; analyser.maxDecibels = -10; // wide range so loud masters don't pin the meter
       spec = new Uint8Array(analyser.frequencyBinCount);
       bus.connect(lim).connect(analyser).connect(master);
-      // beat detection taps a low-passed copy (kick + bass) and reads raw samples, which never saturate
-      const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 150; lp.Q.value = 0.7;
-      bassAn = ac.createAnalyser(); bassAn.fftSize = 1024; bassBuf = new Float32Array(bassAn.fftSize);
-      const sink = ac.createGain(); sink.gain.value = 0;
-      lim.connect(lp).connect(bassAn).connect(sink).connect(ac.destination);
+      // beat detection reads every block of the music itself (not once per drawn frame), so slow
+      // screens can't make it miss beats. ScriptProcessor works on plain http:// too.
+      if (ac.createScriptProcessor) {
+        const sp = ac.createScriptProcessor(4096, 2, 1), sink = ac.createGain(); sink.gain.value = 0; // big blocks ride out a busy page
+        const det = makeOnsetDetector(ac.sampleRate), mono = new Float32Array(4096);
+        sp.onaudioprocess = (ev) => {
+          if (!onsetSink) return;
+          const a = ev.inputBuffer.getChannelData(0), b = ev.inputBuffer.numberOfChannels > 1 ? ev.inputBuffer.getChannelData(1) : a;
+          for (let i = 0; i < a.length; i++) mono[i] = (a[i] + b[i]) * 0.5;
+          // the block's exact audio time (not when the busy page got round to it), so timing never jitters
+          det(mono, (ev.playbackTime - a.length / ac.sampleRate) * 1000, onsetSink);
+        };
+        lim.connect(sp).connect(sink).connect(ac.destination);
+      }
       for (const [name, el] of [['music', music], ['bgm', bgm]]) {
         const tg = ac.createGain(); ac.createMediaElementSource(el).connect(tg).connect(bus);
         trims[name] = tg; el.volume = 1;
@@ -627,15 +684,11 @@ const Snd = (() => {
   }
   function setVol(v) { vol = v; music.volume = bgm.volume = elVol(); if (master) master.gain.value = v; LS.set('sitshow.vol', Math.round(v * 100)); }
   function spectrum() { if (!analyser || ac.state !== 'running') return null; analyser.getByteFrequencyData(spec); return spec; }
-  function bassLevel() { // dB level of the low end over the last ~20 ms
-    if (!bassAn || ac.state !== 'running') return null;
-    bassAn.getFloatTimeDomainData(bassBuf);
-    let sum = 0; for (let i = 0; i < bassBuf.length; i++) sum += bassBuf[i] * bassBuf[i];
-    return 10 * Math.log10(sum / bassBuf.length + 1e-12);
-  }
-  return { unlock, sfx, play, prep, stop, bed: startBed, stopBed, setVol, spectrum, bassLevel, setUrgency(u) { urgency = u ? 1 : 0; }, get vol() { return vol; }, get bedKind() { return bed.kind; } };
+  function audioNow() { return ac ? ac.currentTime * 1000 : 0; }
+  return { unlock, sfx, play, prep, stop, bed: startBed, stopBed, setVol, spectrum, audioNow, onOnset(fn) { onsetSink = fn; }, setUrgency(u) { urgency = u ? 1 : 0; }, get vol() { return vol; }, get bedKind() { return bed.kind; } };
 })();
 addEventListener('pointerdown', Snd.unlock, { capture: true });
+Snd.onOnset((t, v) => { if (S.room && S.room.phase === 'music') beatOnset(t, v); });
 addEventListener('keydown', Snd.unlock, { capture: true });
 $('volume').value = Math.round(Snd.vol * 100);
 $('volume').addEventListener('input', (e) => Snd.setVol(e.target.value / 100));
@@ -726,7 +779,7 @@ function onRoomUpdate(r) {
   if (amHost && r.phase === 'ready') { sb.hidden = false; sb.textContent = `▶ Start round ${r.round + 1}`; sb.onclick = () => send({ t: 'nextRound' }); }
   else if (amHost && r.phase === 'lobby' && r.players.length >= 2) { sb.hidden = false; sb.textContent = '▶ Start the show'; sb.onclick = () => send({ t: 'start' }); }
   else sb.hidden = true;
-  renderPlayers(r); renderHost(); renderPuzzle();
+  renderPlayers(r); renderHost(); renderPuzzle(); renderChatState(r);
 }
 
 function renderPlayers(r) {
@@ -742,7 +795,7 @@ function renderPlayers(r) {
     const av = el('span', { class: 'avatar' }); setAvatarEl(av, p, p.id === S.me.id ? LS.get('sitshow.avatar') : null);
     const canKick = amHost && p.id !== S.me.id && p.id !== r.ownerId;
     ul.append(el('li', { class: (p.id === S.me.id ? 'me ' : '') + (playing && p.inGame && !p.alive ? 'out ' : '') + (p.away ? 'away' : ''), title: p.away ? 'Reconnecting…' : '' },
-      av, el('span', { class: 'pn' + (p.bot ? '' : ' clickable'), title: p.bot ? '' : 'View player card', onclick: p.bot ? null : () => openCard(p.id), text: (p.id === r.hostId ? '👑 ' : '') + p.name }, p.acct && el('span', { class: 'acct-tick', title: 'Registered account', text: '✓' })),
+      av, el('span', { class: 'pn' + (p.bot ? '' : ' clickable'), title: p.bot ? '' : 'View player card', onclick: p.bot ? null : () => openCard(p.id), text: (p.id === r.hostId ? '👑 ' : '') + p.name }, p.acct && el('span', { class: 'acct-tick', title: 'Verified account', text: '✓' })),
       el('span', { class: 'lv', text: 'Lv ' + p.level }), el('span', { text: status }),
       canKick && el('button', { class: 'kick', title: `Remove ${p.name} from the show`, text: '✕', onclick: () => { if (p.bot || confirm(`Remove ${p.name} from the show? They won't be able to rejoin.`)) send({ t: 'kick', id: p.id }); } })));
   }
@@ -980,7 +1033,7 @@ document.addEventListener('keydown', (e) => {
     const n = r.chairs.length;
     for (let k = 1; k <= n; k++) { const i = ((S.myPick ?? -1) + (e.shiftKey ? -k : k) + n * 2) % n; if (!r.chairs[i].owner) { pickChair(i); break; } }
   } else if (e.target.tagName === 'INPUT') {
-    // typing an answer
+    // typing an answer (or chatting)
   } else if (e.key === ' ' && pz && (pz.kind === 'reaction' || pz.kind === 'mash')) {
     e.preventDefault();
     if (e.repeat) return;
@@ -989,6 +1042,50 @@ document.addEventListener('keydown', (e) => {
     submitAnswer(pz.choices[+e.key - 1]);
   }
 });
+
+// ───────────────────────────── chat (green room + players who are out) ─────────────────────────────
+let chatUnread = 0;
+let chatOpen = S.streamer ? false : LS.get('sitshow.chatOpen') !== '0'; // hidden by default in streamer mode
+function setChatOpen(open, remember = true) {
+  chatOpen = open;
+  $('chat').classList.toggle('closed', !open);
+  $('chatToggle').setAttribute('aria-expanded', String(open));
+  if (remember) LS.set('sitshow.chatOpen', open ? '1' : '0');
+  if (open) { chatUnread = 0; updateChatBadge(); const log = $('chatLog'); log.scrollTop = log.scrollHeight; }
+}
+function updateChatBadge() { const b = $('chatBadge'); b.hidden = !chatUnread || chatOpen; b.textContent = chatUnread > 9 ? '9+' : chatUnread; }
+function addChat(m, quiet) {
+  const log = $('chatLog'), atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 30;
+  const isMe = m.id === S.me?.id;
+  const tag = m.out ? '👻' : m.watching ? '👀' : '';
+  log.append(el('li', null,
+    tag && el('span', { class: 'tag', title: m.out ? 'Knocked out' : 'Watching', text: tag }),
+    el('span', { class: 'cn' + (isMe ? ' me' : ''), text: m.name }, m.acct && el('span', { class: 'acct-tick', title: 'Verified account', text: '✓' })),
+    document.createTextNode(m.text)));
+  while (log.children.length > 80) log.firstChild.remove();
+  if (atEnd || isMe) log.scrollTop = log.scrollHeight;
+  if (!quiet && !chatOpen && !isMe) { chatUnread++; updateChatBadge(); }
+}
+function canChat(r) {
+  const me = r && r.byId.get(S.me.id);
+  if (!r || !me) return false;
+  return r.phase === 'lobby' || r.phase === 'gameover' || !(me.inGame && me.alive);
+}
+function renderChatState(r) {
+  const ok = canChat(r), inp = $('chatInput');
+  inp.disabled = !ok;
+  inp.placeholder = ok ? 'Say something…' : 'You can chat once you\'re out — or back in the green room';
+  $('chatForm').querySelector('button').disabled = !ok;
+  $('chatWho').textContent = r.phase === 'lobby' || r.phase === 'gameover' ? 'green room' : 'the gallery';
+}
+$('chatToggle').addEventListener('click', () => setChatOpen(!chatOpen));
+$('chatForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const v = $('chatInput').value.trim();
+  if (!v || !canChat(S.room)) return;
+  send({ t: 'chat', text: v }); $('chatInput').value = '';
+});
+setChatOpen(chatOpen, false);
 
 // ───────────────────────────── leaderboards & player cards ─────────────────────────────
 S.boardTab = LS.get('sitshow.board') || 'levels';
@@ -1009,7 +1106,7 @@ function renderBoard(box) {
         : el('span', { class: 'bv', text: row.points + ' pts' }, el('small', { text: `${row.wins} win${row.wins === 1 ? '' : 's'}` }));
       ul.append(el('li', { class: row.id === S.me?.id ? 'me' : '', onclick: () => openCard(row.id), title: 'View player card' },
         el('span', { class: 'rk', text: ['🥇', '🥈', '🥉'][i] || '#' + (i + 1) }), av,
-        el('span', { class: 'bn', text: row.name }, row.acct && el('span', { class: 'acct-tick', text: ' ✓' })), val));
+        el('span', { class: 'bn', text: row.name }, row.acct && el('span', { class: 'acct-tick', title: 'Verified account', text: '✓' })), val));
     });
     box.append(ul);
   }
@@ -1029,7 +1126,7 @@ function renderCard(c) {
   const got = new Map((c.achievements || []).map((a) => [a.ach_id, a.at]));
   body.append(
     el('div', { class: 'pc-head' }, av, el('div', null,
-      el('div', { class: 'pc-name', text: c.name }),
+      el('div', { class: 'pc-name', text: c.name }, c.acct && el('span', { class: 'acct-tick big', title: 'Verified account', text: '✓' })),
       el('div', { class: 'pc-sub' },
         el('span', { class: 'lv-badge', text: 'Lv ' + c.level }),
         el('span', { class: 'pc-pill', text: c.xp + ' XP' }),
@@ -1111,18 +1208,83 @@ const cv = $('stage'), g = cv.getContext('2d');
 const wrap = $('stageWrap');
 let W = 0, H = 0, DPR = 1, L = { cx: 0, cy: 0, RX: 1, RY: 1, s: 1, vh: 30 }, bgBack = null, bgFloor = null, spin = 0, lastT = performance.now();
 const ents = new Map(); // id -> render entity
-const BEAT = { at: -1e9, prev: -120, slow: -60, hist: [], hue: 300, pulse: 0, spec: null };
+const BEAT = { at: -1e9, hue: 300, pulse: 0, spec: null };
+// Beat tracking: spectral-flux onsets are binned every 20 ms; every 400 ms the last 6 s are autocorrelated to find
+// the tempo, a comb finds where the beats fall, and pulses fire on that grid. Tracks without a clear
+// rhythm get no pulses at all, and stray bass notes between beats don't set anything off.
+const BT = { bins: new Float32Array(512), lastBin: -1, p97: 0, period: 0, conf: 0, next: 0, analysedAt: 0, started: 0, log: [] };
+// All times are audio-clock milliseconds, so busy or slow screens don't affect the timing.
+function beatReset() { BT.lastBin = -1; BT.started = 0; BT.period = 0; BT.conf = 0; BT.next = 0; BT.analysedAt = 0; BT.bins.fill(0); }
+function beatOnset(t, v) { // one onset value per ~5 ms of audio
+  if (!BT.started) BT.started = t;
+  const bin = Math.floor(t / 20);
+  if (BT.lastBin < 0) BT.lastBin = bin - 1;
+  if (bin - BT.lastBin > 512) BT.lastBin = bin - 1;
+  while (BT.lastBin < bin) { BT.lastBin++; BT.bins[BT.lastBin % 512] = 0; }
+  BT.bins[bin % 512] = Math.max(BT.bins[bin % 512], v);
+  if (t - BT.analysedAt > 400 && t - BT.started > 2500) { BT.analysedAt = t; analyseTempo(t, bin); }
+}
+function beatDue(t) { // true once per beat, on the tempo grid
+  if (!BT.period || BT.conf < 0.4 || t < BT.next) return false;
+  while (BT.next + BT.period <= t) BT.next += BT.period; // skip beats we were too late for
+  BT.next += BT.period;
+  BT.log.push(Math.round(t)); if (BT.log.length > 200) BT.log.shift();
+  return true;
+}
+function analyseTempo(now, bin) {
+  const N = Math.min(300, bin - Math.floor(BT.started / 20));
+  if (N < 120) return;
+  const e = new Float32Array(N);
+  let mean = 0;
+  for (let i = 0; i < N; i++) { e[i] = BT.bins[(bin - N + 1 + i) % 512]; mean += e[i]; }
+  mean /= N;
+  // no real hits (drums, plucks…) in the last 6 s → no beats, however regular the wobble looks
+  const srt = Float32Array.from(e).sort();
+  BT.p97 = srt[Math.floor(N * 0.97)];
+  if (BT.p97 < 1.2) { BT.conf = 0; return; }
+  let r0 = 0;
+  for (let i = 0; i < N; i++) { e[i] = Math.max(0, e[i] - mean); r0 += e[i] * e[i]; }
+  if (r0 < 1e-3) { BT.conf = 0; return; }
+  r0 /= N;
+  const ac = new Float32Array(48);
+  let best = 0, bestL = 0;
+  for (let L = 15; L <= 46; L++) { // 65–200 BPM
+    let sum = 0;
+    for (let i = L; i < N; i++) sum += e[i] * e[i - L];
+    ac[L] = sum / (N - L);
+    const w = Math.exp(-0.5 * (Math.log2(3000 / L / 120) / 0.7) ** 2); // gently prefer ~120 BPM (avoids half/double tempo)
+    if (ac[L] * w > best) { best = ac[L] * w; bestL = L; }
+  }
+  if (!bestL) return;
+  let Lf = bestL;
+  if (bestL > 15 && bestL < 46) { const a = ac[bestL - 1], b = ac[bestL], c = ac[bestL + 1], d = a - 2 * b + c; if (d < 0) Lf = bestL + (0.5 * (a - c)) / d; }
+  let bestO = 0, bestS = -1;
+  for (let o = 0; o < bestL; o++) {
+    let sc = 0;
+    for (let x = N - 1 - o; x >= 0; x -= Lf) { const xi = Math.round(x); sc += e[xi] + 0.5 * ((e[xi - 1] || 0) + (e[xi + 1] || 0)); }
+    if (sc > bestS) { bestS = sc; bestO = o; }
+  }
+  const period = Lf * 20;
+  let next = (bin - bestO) * 20 + 10;
+  while (next <= now) next += period;
+  if (BT.next && BT.period && Math.abs(BT.next - next) < period * 0.3) next = BT.next * 0.6 + next * 0.4; // smooth corrections
+  BT.period = period; BT.conf = ac[bestL] / r0; BT.next = next;
+}
+if (/[?&]debug=1/.test(location.search)) window.__sitshow = { BT, BEAT };
 const confetti = [];
 const imgCache = new Map();
 const DEATH_MS = 2500;
 const FONT_D = 'Impact, "Arial Black", sans-serif', FONT_B = '"Trebuchet MS", system-ui, sans-serif';
 
+let galleryOn = false;
+const galleryWidth = () => clamp(W * 0.14, 96, 190);
 function resize() {
   const r = wrap.getBoundingClientRect(); if (!r.width || !r.height) return;
   DPR = Math.min(2, devicePixelRatio || 1); W = r.width; H = r.height;
   cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
-  const RY = Math.min(H * 0.19, W * 0.38 * 0.45), RX = Math.min(W * 0.38, RY * 2.7);
-  L = { cx: W / 2, cy: H * 0.5, RX, RY, s: clamp(RY / 130, 0.5, 1.15), vh: clamp(H * 0.07, 24, 58) };
+  const SW = W - (galleryOn ? galleryWidth() : 0); // stage width (the gallery takes the right-hand strip)
+  const RY = Math.min(H * 0.19, SW * 0.38 * 0.45), RX = Math.min(SW * 0.38, RY * 2.7);
+  L = { cx: SW / 2, cy: H * 0.5, RX, RY, s: clamp(RY / 130, 0.5, 1.15), vh: clamp(H * 0.07, 24, 58) };
   bgBack = renderBack(); bgFloor = renderFloor();
 }
 new ResizeObserver(resize).observe(wrap);
@@ -1313,18 +1475,60 @@ function drawFog(t) {
   }
   g.restore();
 }
+// The gallery: a stepped riser on the right where knocked-out and late players watch
+function galleryLayout(n) {
+  const gw = galleryWidth(), x0 = W - gw, y0 = Math.max(H * 0.3, L.vh + 150), y1 = H - 78;
+  const rowsFit = Math.max(1, Math.floor((y1 - y0) / 62)), colsFit = Math.max(1, Math.floor((gw - 26) / 46));
+  const cols = Math.max(1, Math.min(n, Math.max(colsFit, Math.ceil(n / rowsFit)))), rows = Math.max(1, Math.ceil(n / cols)); // fill a tier across first
+  const tiers = Math.max(3, rows), tierH = (y1 - y0) / tiers;
+  const sc = clamp(Math.min(tierH / 112, (gw - 26) / cols / 64), 0.26, 0.68);
+  return {
+    n, gw, x0, y0, y1, tiers, tierH, cols, sc,
+    spot(i) { // front (lowest) tier fills first
+      const row = tiers - 1 - Math.floor(i / cols), col = i % cols, stagger = (tiers - 1 - row) % 2 ? 0.5 : 0;
+      return { x: x0 + 16 + ((col + 0.5 + stagger * (cols > 1 ? 0.5 : 0)) * (gw - 26)) / cols, y: y0 + (row + 1) * tierH - 4 };
+    },
+  };
+}
+function drawGallery(gal, t) {
+  const { x0, y0, y1, gw, tiers, tierH } = gal;
+  // legs
+  g.strokeStyle = '#4a4560'; g.lineWidth = 3;
+  for (const fx of [0.12, 0.5, 0.88]) { const x = x0 + gw * fx; g.beginPath(); g.moveTo(x, y1); g.lineTo(x, H); g.stroke(); }
+  // stepped tiers, each a little further back
+  for (let k = 0; k < tiers; k++) {
+    const y = y0 + k * tierH, inset = (tiers - 1 - k) * 4;
+    const tg = g.createLinearGradient(0, y, 0, y + tierH);
+    tg.addColorStop(0, '#3a1a5c'); tg.addColorStop(1, '#22103a');
+    g.fillStyle = tg; g.fillRect(x0 + 6 + inset, y, gw - 6 - inset, tierH);
+    g.fillStyle = '#ffc83d'; g.fillRect(x0 + 6 + inset, y + tierH - 3, gw - 6 - inset, 3); // gold step edge
+  }
+  // railing along the front
+  g.strokeStyle = 'rgba(255,200,61,.8)'; g.lineWidth = 2;
+  g.beginPath(); g.moveTo(x0 + 6, y0 - 4); g.lineTo(x0 + 6, y1);
+  for (let y = y0; y < y1; y += 18) { g.moveTo(x0 + 2, y); g.lineTo(x0 + 10, y); }
+  g.stroke();
+  // sign
+  const sy = y0 - 22;
+  g.fillStyle = '#0b0712'; rrect(g, x0 + 10, sy - 13, gw - 20, 22, 6); g.fill();
+  g.strokeStyle = '#ffc83d'; g.lineWidth = 1.5; rrect(g, x0 + 10, sy - 13, gw - 20, 22, 6); g.stroke();
+  g.fillStyle = '#ffc83d'; g.font = `12px ${FONT_D}`; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText('THE GALLERY', x0 + gw / 2 + 2, sy - 1, gw - 28);
+}
 function drawAudience(t, r) {
   const mood = r.phase === 'music' ? 1 : r.phase === 'results' || r.phase === 'gameover' ? 2 : r.phase === 'scramble' ? 3 : 0;
+  const Z = 1.35; // crowd size
   for (let row = 0; row < 2; row++) {
-    const spacing = row ? 34 : 30, y = H + (row ? 6 : -10);
+    const spacing = (row ? 34 : 30) * Z, y = H + (row ? 8 : -14);
     for (let i = 0, x = row ? 4 : -12; x < W + 20; x += spacing, i++) {
       const seed = i * 7.3 + row * 13;
       const bob = mood === 1 ? Math.abs(Math.sin(t * 4.4 + seed)) * 4 + BEAT.pulse * (4 + sr(seed, 3) * 6) : mood === 2 ? Math.abs(Math.sin(t * 7 + seed)) * 8 : mood === 3 ? Math.sin(t * 20 + seed) * 1.5 : Math.sin(t * 1.3 + seed);
-      const hy = y - 26 - bob, sc = 0.9 + sr(seed, 9) * 0.25;
+      const hy = y - 26 * Z - bob, sc = (0.9 + sr(seed, 9) * 0.25) * Z;
       g.fillStyle = row ? '#0a0414' : '#1e0d36';
       if (mood === 2 && sr(seed, 1) > 0.45) { // arms up!
         g.strokeStyle = g.fillStyle; g.lineWidth = 5; g.lineCap = 'round';
-        g.beginPath(); g.moveTo(x - 10, y - 14 - bob); g.lineTo(x - 15, hy - 16); g.moveTo(x + 10, y - 14 - bob); g.lineTo(x + 15, hy - 16); g.stroke();
+        g.lineWidth = 5 * Z;
+        g.beginPath(); g.moveTo(x - 10 * Z, y - 14 * Z - bob); g.lineTo(x - 15 * Z, hy - 16 * Z); g.moveTo(x + 10 * Z, y - 14 * Z - bob); g.lineTo(x + 15 * Z, hy - 16 * Z); g.stroke();
       }
       ellipse(g, x, y - bob * 0.3, 17 * sc, 14 * sc); g.fill();
       ellipse(g, x, hy, 9 * sc, 10 * sc); g.fill();
@@ -1332,7 +1536,7 @@ function drawAudience(t, r) {
       if (mood && sr(seed, 2) > 0.86) { // phone lights
         const a = 0.5 + 0.5 * Math.sin(t * 3 + seed);
         g.fillStyle = `rgba(255,255,230,${0.5 + a * 0.5})`; g.shadowColor = '#fff'; g.shadowBlur = 8;
-        g.fillRect(x + 8, hy - 18, 4, 7); g.shadowBlur = 0;
+        g.fillRect(x + 8 * Z, hy - 18 * Z, 4 * Z, 7 * Z); g.shadowBlur = 0;
       }
     }
   }
@@ -1424,9 +1628,15 @@ function drawAvatar(c, x, y, k, p, t, o = {}) {
 }
 function drawTag(c, x, y, k, p, isMe) {
   const fs = clamp(12 * k, 9, 14); c.font = `700 ${fs}px ${FONT_B}`; c.textAlign = 'center'; c.textBaseline = 'middle';
-  const label = (p.away ? '📡 ' : '') + p.name, w = c.measureText(label).width + 12;
+  const label = (p.away ? '📡 ' : '') + p.name, tick = p.acct ? fs + 3 : 0, w = c.measureText(label).width + 12 + tick;
   c.fillStyle = isMe ? '#ffc83d' : 'rgba(10,4,24,.78)'; rrect(c, x - w / 2, y + 5, w, fs + 6, 6); c.fill();
-  c.fillStyle = isMe ? '#1b0b33' : '#fff3d6'; c.fillText(label, x, y + 5 + (fs + 6) / 2 + 0.5);
+  c.fillStyle = isMe ? '#1b0b33' : '#fff3d6'; c.fillText(label, x - tick / 2, y + 5 + (fs + 6) / 2 + 0.5);
+  if (tick) { // blue "verified" tick for account holders
+    const tx = x + w / 2 - 6 - fs / 2, ty = y + 5 + (fs + 6) / 2, rr = fs * 0.48;
+    c.fillStyle = '#1d9bf0'; ellipse(c, tx, ty, rr, rr); c.fill();
+    c.strokeStyle = '#fff'; c.lineWidth = Math.max(1.4, fs * 0.14); c.lineCap = 'round'; c.lineJoin = 'round';
+    c.beginPath(); c.moveTo(tx - rr * 0.45, ty + rr * 0.02); c.lineTo(tx - rr * 0.1, ty + rr * 0.38); c.lineTo(tx + rr * 0.5, ty - rr * 0.35); c.stroke();
+  }
 }
 function drawChair(c, x, y, k, i, st, t) {
   c.save(); c.translate(x, y); c.scale(k, k);
@@ -1563,27 +1773,22 @@ function frame(now) {
   // rise in bass energy compared with how much it has been rising recently, so it adapts to quiet,
   // loud or heavily compressed tracks alike.
   const circling = r.phase === 'music';
-  const sp = Snd.spectrum(), lv = circling ? Snd.bassLevel() : null;
-  if (lv != null) {
-    const rise = Math.max(0, lv - BEAT.prev); BEAT.prev = lv;
-    const h = BEAT.hist; h.push(rise); if (h.length > 60) h.shift();
-    const mean = h.reduce((a, b) => a + b, 0) / h.length;
-    const sd = Math.sqrt(h.reduce((a, b) => a + (b - mean) ** 2, 0) / h.length);
-    BEAT.slow = BEAT.slow * 0.98 + lv * 0.02;
-    if (h.length > 12 && rise > Math.max(0.8, mean + 1.6 * sd) && lv > -55 && lv > BEAT.slow - 3 && now - BEAT.at > 230) {
-      BEAT.at = now; BEAT.hue = (BEAT.hue + 53) % 360;
-    }
-  } else { BEAT.hist.length = 0; BEAT.prev = -120; }
+  const sp = Snd.spectrum();
+  if (!circling) { if (BT.started) beatReset(); }
+  else if (beatDue(Snd.audioNow())) { BEAT.at = now; BEAT.hue = (BEAT.hue + 53) % 360; }
   const strength = circling ? 1 : 0;
   const pulse = Math.exp(-(now - BEAT.at) / 170) * strength;
   BEAT.pulse = pulse; BEAT.spec = sp;
   if (r.phase === 'music') spin += dt * 0.6 * (r.settings.speed ? 1.1 : 1); else if (idle) spin += dt * 0.14;
 
-  const zoom = 1 + 0.014 * pulse; // a little camera kick on each beat
-  g.setTransform(DPR * zoom, 0, 0, DPR * zoom, DPR * (L.cx - L.cx * zoom), DPR * (L.cy - L.cy * zoom));
+  // on a beat only the stage itself (floor, chairs, dancers) gives a small thump; the room stays still
+  const shX = (Math.random() - 0.5) * 1.6 * pulse, shY = 2.4 * pulse * L.s;
+  const stageOn = () => g.setTransform(DPR, 0, 0, DPR, DPR * shX, DPR * shY), stageOff = () => g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  stageOff();
   g.drawImage(bgBack, 0, 0, W, H);
   drawCurtain(t);
   drawScreens(t, r);
+  stageOn();
   g.drawImage(bgFloor, 0, 0, W, H);
   const { cx, cy, RX, RY, s } = L;
   if (pulse > 0.02) { // floor flash + shockwave ring on the beat
@@ -1604,15 +1809,19 @@ function frame(now) {
     if (lit) { g.shadowColor = g.fillStyle; g.shadowBlur = 12; }
     ellipse(g, cx + Math.cos(a) * RX * 1.22, cy + Math.sin(a) * RY * 1.6, 4.5 * s, 4.5 * s); g.fill(); g.shadowBlur = 0;
   }
+  stageOff();
   const lamps = drawTruss(t, r);
   drawValance(t);
   drawBeams(t, r, lamps);
   drawSparkles(t);
+  stageOn();
   drawFog(t);
 
   // where everyone should be
   const onStage = r.players.filter((p) => (r.phase === 'lobby' ? true : p.inGame && p.alive)); // out = audience until the next show
   const audience = r.players.filter((p) => !onStage.includes(p));
+  const wantGallery = audience.length > 0;
+  if (wantGallery !== galleryOn) { galleryOn = wantGallery; resize(); } // make room for the gallery on the right
   const nCh = r.chairs.length, items = [], cs = chairScale(nCh);
   const crowd = clamp(1 - (onStage.length - 10) * 0.015, 0.7, 1); // shrink dancers in big shows
   const seen = new Set();
@@ -1638,8 +1847,8 @@ function frame(now) {
     const a = (i / onStage.length) * TAU + spin, y = cy + Math.sin(a) * RY;
     place(p, cx + Math.cos(a) * RX, y, 'ring', s * crowd * (0.86 + 0.28 * ((y - (cy - RY)) / (2 * RY))));
   });
-  const cols = Math.max(1, Math.floor((W * 0.45) / 40)); // spectators: rows along the bottom-right
-  audience.forEach((p, i) => place(p, W - 30 - (i % cols) * 40, H - 30 - Math.floor(i / cols) * 40, 'aud', 0.5));
+  const gal = galleryLayout(audience.length);
+  audience.forEach((p, i) => { const g2 = gal.spot(i); place(p, g2.x, g2.y, 'aud', gal.sc); });
   for (const id of ents.keys()) if (!seen.has(id)) ents.delete(id);
 
   r.chairs.forEach((c, i) => {
@@ -1670,17 +1879,21 @@ function frame(now) {
       g.fillText('✗', e.x + Math.sin(k * 30) * 4, e.y - 96 * e.sc - k * 14); g.globalAlpha = 1;
     }
   }
+  stageOff();
+  if (gal.n) {
+    drawGallery(gal, t);
+    audItems.sort((a, b) => a.e.y - b.e.y);
+    for (const { p, e } of audItems) { drawAvatar(g, e.x, e.y, e.sc, p, t, { alpha: p.away ? 0.45 : 1, noShadow: true }); drawTag(g, e.x, e.y, e.sc * 0.9, p, p.id === S.me.id); }
+  }
   drawAudience(t, r);
-  for (const { p, e } of audItems) drawAvatar(g, e.x, e.y, e.sc, p, t, { alpha: p.away ? 0.45 : 0.95 });
-  if (audItems.length) { g.font = `700 11px ${FONT_B}`; g.textAlign = 'right'; g.fillStyle = 'rgba(255,243,214,.7)'; g.fillText('WATCHING', W - 12, H - 74 - Math.floor((audItems.length - 1) / cols) * 40); }
 
   // emote bubbles float above everything
   g.textAlign = 'center'; g.textBaseline = 'middle';
   for (const e of ents.values()) {
     e.emotes = e.emotes.filter((m) => now - m.at < 2300);
     e.emotes.forEach((m) => {
-      const k = (now - m.at) / 2300, pop = Math.min(1, k * 8), sz = Math.max(22, 34 * e.sc) * (0.4 + 0.6 * pop);
-      const ex = e.x + Math.sin(k * 9 + m.at) * 8, ey = e.y - 104 * e.sc - k * 46;
+      const k = (now - m.at) / 2300, pop = Math.min(1, k * 8), sz = Math.max(30, 44 * e.sc) * (0.4 + 0.6 * pop);
+      const ex = e.x + Math.sin(k * 9 + m.at) * 8, ey = Math.min(e.y - 108 * e.sc - k * 50, H - 110); // never down in the crowd
       g.globalAlpha = k > 0.75 ? (1 - k) / 0.25 : 1;
       g.fillStyle = '#fff'; ellipse(g, ex, ey, sz * 0.72, sz * 0.72); g.fill();
       g.font = `${sz}px ${FONT_B}`; g.fillText(m.e, ex, ey + 2);

@@ -125,6 +125,11 @@ function autoplay(c, stats) {
   console.log('takeover by newest connection ok');
   const H = A3;
 
+  // green-room chat
+  B.send({ t: 'chat', text: 'hello <b>studio</b>' });
+  const said = await H.wait((m) => m.t === 'chat' && m.id === B.me.id);
+  assert.equal(said.text, 'hello bstudio/b'); assert.equal(said.out, false);
+  console.log('green-room chat ok');
   H.send({ t: 'addBot' }); H.send({ t: 'addBot' });
   await H.wait((m) => m.t === 'room' && m.players.length === 4);
 
@@ -139,6 +144,10 @@ function autoplay(c, stats) {
     if (m.phase === 'ready' && stats.lastReady !== m.round) { stats.lastReady = m.round; stats.readies++; setTimeout(() => H.send({ t: 'nextRound' }), 600); }
   };
   H.send({ t: 'start' });
+  await H.wait((m) => m.t === 'room' && m.phase === 'intro');
+  H.send({ t: 'chat', text: 'can I talk?' }); // still in the show → refused
+  await H.wait((m) => m.t === 'toast' && /Chat opens/.test(m.msg));
+  console.log('in-show chat blocked for players still in');
   const over = await H.wait((m) => m.t === 'room' && m.phase === 'gameover', 300000);
   console.log('winner:', over.standings[0].name, '| order:', over.standings.map((s) => s.name).join(' > '));
   console.log('music seconds:', stats.music.map((x) => (x / 1000).toFixed(1)).join(', '), '| manual pauses:', stats.readies);

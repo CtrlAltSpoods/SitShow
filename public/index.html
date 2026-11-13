@@ -155,6 +155,7 @@
     </div>
 
     <aside class="side">
+      <div class="side-scroll">
       <div class="side-me">
         <button class="avatar-btn small" data-avatar-upload title="Change your profile picture">
           <span class="avatar" data-my-avatar></span><span class="avatar-edit">📷</span>
@@ -174,6 +175,19 @@
       <h3 class="side-h">Contestants <span id="playerCount"></span></h3>
       <ul class="players" id="playerList"></ul>
       <p class="hint keys">During a scramble: click a chair or press <kbd>Tab</kbd> to switch, <kbd>1</kbd>–<kbd>4</kbd> to answer, <kbd>Space</kbd> for tap games.</p>
+      </div>
+      <section class="chat" id="chat">
+        <button class="chat-head" id="chatToggle" type="button" aria-expanded="true">
+          <span>💬 Chat <small id="chatWho"></small></span><span class="chat-badge" id="chatBadge" hidden></span><span class="chev">▾</span>
+        </button>
+        <div class="chat-body" id="chatBody">
+          <ul class="chat-log" id="chatLog" aria-live="polite"></ul>
+          <form class="chat-form" id="chatForm">
+            <input id="chatInput" maxlength="200" autocomplete="off" placeholder="Say something…" aria-label="Chat message">
+            <button class="btn small" type="submit">Send</button>
+          </form>
+        </div>
+      </section>
     </aside>
   </div>
 </main>

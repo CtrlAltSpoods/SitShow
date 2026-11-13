@@ -620,6 +620,7 @@ function attach(conn, room, p) { // (re)connect a socket to its seat in a room
   if (room.ownerId === conn.pid) room.hostId = conn.pid; // the original host always gets control back
   conn.send({ t: 'joined', code: room.code });
   conn.send(roomState(room));
+  conn.send({ t: 'chatHistory', list: room.chat });
   pushState(room); pushLobby();
 }
 function joinRoom(conn, room) {
@@ -641,7 +642,7 @@ const handlers = {
       max: Math.min(MAX_PLAYERS, Math.max(2, m.max | 0 || 8)), players: new Map(), hostId: conn.pid, ownerId: conn.pid,
       phase: 'lobby', round: 0, chairs: [], currentSong: null, lastSong: null, settings: defaultSettings(),
       lastOut: [], outOrder: [], nobody: false, winner: null, standings: null, phaseEnds: 0, musicStart: 0,
-      banned: new Set(), usedQ: new Set(), chairTimers: [],
+      banned: new Set(), usedQ: new Set(), chairTimers: [], chat: [],
     };
     if (pw) { const salt = crypto.randomBytes(16); room.pw = { salt, hash: hashPw(pw, salt) }; }
     rooms.set(room.code, room);
@@ -743,6 +744,22 @@ const handlers = {
       stats, achievements: store.achievements(id), levelRank: row.xp > 0 ? store.rankLevel(row.xp) : null,
       today: d ? { ...d, rank: store.rankDay(day, d.points) } : null,
     });
+  },
+
+  // Chat is for the green room and for players who are out: while a show is on, contestants still
+  // in it can read along but can't post until they're out (or the show ends).
+  chat(conn, m) {
+    const room = conn.room; if (!room) return;
+    const p = room.players.get(conn.pid); if (!p) return;
+    const text = cleanText(m.text, 200); if (!text) return;
+    const live = room.phase !== 'lobby' && room.phase !== 'gameover';
+    if (live && p.inGame && p.alive) return conn.send({ t: 'toast', msg: 'Chat opens for you once you\'re out — or back in the green room.' });
+    const now = Date.now();
+    if (now - (conn.lastChat || 0) < 700) return;
+    conn.lastChat = now;
+    const msg = { t: 'chat', id: p.id, name: conn.prof.name, text, at: now, acct: !!conn.prof.account, out: live && p.inGame, watching: live && !p.inGame };
+    room.chat.push(msg); if (room.chat.length > 60) room.chat.shift();
+    sendRoom(room, msg);
   },
 
   // ── host controls ──

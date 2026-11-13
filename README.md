@@ -57,10 +57,12 @@ with ffmpeg (included in the Docker image) and every player's browser turns loud
 down and quiet ones up, with a limiter so nothing clips. Results are cached in the
 database; new or changed files are measured in the background.
 
-**The stage reacts to the bass** while everyone circles the chairs: the floor flashes and
-pulses, the lights and bulbs punch and the crowd bounces on each beat (detected from sudden
-rises in the low end, so it works on loud, compressed tracks too), and the screen beside the
-stage shows the live spectrum.
+**The stage reacts to the beat** while everyone circles the chairs: the floor flashes and
+pulses, the lights and bulbs punch, the stage gives a small thump and the crowd bounces, and
+the screen beside the stage shows the live spectrum. Each browser tracks the tempo itself:
+it listens for hits (kick, snare, click) across four frequency bands, works out the tempo
+from the last few seconds, and pulses on that beat grid — so it stays in time on loud,
+compressed masters and stays still on tracks with no clear beat.
 
 There's never dead air: between rounds a built-in game-show vamp plays, and while players
 are solving a built-in ticking "thinking" loop plays (it speeds up in the last 5 seconds).
@@ -150,8 +152,12 @@ to the original host when they reconnect. Anyone who drops keeps their spot for 
   home page and behind 🎭 in a show; you can preview locked items.
 - Up to **30 players** per show (bots included). Big shows use two rings of chairs and
   knock out about a sixth of the field each round, so a full studio finishes in ~12 rounds.
-- Late joiners and eliminated players watch from the audience until the next show.
-  Volume starts at 10%.
+- **The gallery**: knocked-out players and late joiners watch from a stepped platform on
+  the right of the stage until the next show.
+- **Chat** (side panel): open in the green room, and in the gallery during a show. Players
+  still in the show can read it but can't post until they're out or the show ends. It can be
+  collapsed, and starts collapsed in streamer mode.
+- Account holders have a blue ✓ next to their name. Volume starts at 10%.
 
 ## Controls
 
