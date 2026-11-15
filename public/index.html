@@ -119,6 +119,7 @@
       <button type="button" class="btn ghost small" id="invSignin" hidden>🔑 I have an account — sign in with my passkey</button>
       <label class="switch"><input type="checkbox" data-streamer><span></span> 🎥 Streamer mode</label>
       <button class="btn primary wide" type="submit">Take your seat</button>
+      <button class="btn small wide" type="button" id="invSpectate">👀 Spectate — watch from the audience</button>
       <button class="btn ghost small" type="button" id="invBack">Not now — go to the lobby</button>
     </form>
   </div>
@@ -191,9 +192,11 @@
       </div>
 
       <div class="host-box" id="hostBox"></div>
+      <div class="team-box" id="teamBox" hidden></div>
 
-      <h3 class="side-h">Contestants <span id="playerCount"></span></h3>
+      <h3 class="side-h">Contestants <span id="playerCount"></span> <button class="btn tiny ghost" id="specToggle" hidden></button></h3>
       <ul class="players" id="playerList"></ul>
+      <div id="specWrap" hidden><h3 class="side-h">👀 In the audience <span id="specCount"></span></h3><ul class="players specs" id="specList"></ul></div>
       <p class="hint keys">During a scramble: click a chair or press <kbd>Tab</kbd> to switch, <kbd>1</kbd>–<kbd>4</kbd> to answer, <kbd>Space</kbd> for tap games.</p>
       </div>
     </aside>

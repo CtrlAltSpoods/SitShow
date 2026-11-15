@@ -120,11 +120,38 @@ In the room's side panel the host can set:
 - **I'll start each round myself** — the show pauses after every round until the host
   presses **Start round**
 - which **chair challenges** are used (see below)
+- **🚩 Team show** — see *Teams* below
 - bots, and removing players (✕ next to their name; removed players can't rejoin that show)
 
 During a show the host can also **Stop the music now** or **End show**.
 If the host's connection drops, someone else stands in, and control goes straight back
 to the original host when they reconnect. Anyone who drops keeps their spot for 60 seconds.
+
+## Teams
+
+When the host ticks **🚩 Team show**, a Teams panel appears in the green room. Anyone can
+**create a team** and name it (up to 6 per team); others press **Join**. The creator is the
+**leader** (👑) and is the only one who can rename it — if they leave, the next member takes over.
+Anyone without a team plays solo.
+
+In the show each team acts as one contestant:
+
+- the team gets **one chair**, and only the **leader** can switch chairs; teammates automatically
+  work on the leader's chair, so everyone sees the same challenge
+- the **first teammate to solve it seats the whole team**; a wrong answer only freezes the
+  person who gave it
+- the team huddles together on stage — a little conga line round the chairs, all squeezed onto
+  one chair — with a 🚩 pennant over the leader
+- teams are knocked out, reach the final and win together, and **every member gets the full XP**
+  (and the win) as if they'd played solo
+
+## Spectators
+
+On the home page's **Now showing** list (and on invite links), **👀 Spectate** joins a show to
+watch rather than play. Spectators stand in the crowd at the front of the stage (not in the
+gallery), can chat, emote and join a Mexican wave, and **can vote in the final** for the bonus
+XP. They don't take a contestant spot. In the green room anyone can switch with
+**👀 Just watch** / **🎮 Play**. If every player leaves, spectators go back to the lobby.
 
 ## Chair challenges
 
@@ -155,7 +182,7 @@ marker on their tab. You can still switch to one yourself.
   leaderboards and player cards while they're offline and follows them to new devices.
 - **Emotes**, **levels and XP**, and unlockable **dances**, **dramatic exits**,
   **avatar frames** and more emotes. The wardrobe sits in the profile panel on the
-  home page and behind 🎭 in a show; you can preview locked items. There are 15 dances (up
+  home page and behind 🎭 in a show, in the order they unlock; you can preview locked items. There are 15 dances (up
   to *Levitate* at level 26) and 11 frames; the higher frames are fully animated: *Inferno*
   (11), *Tesla Coil* (17), *Galaxy* with orbiting planets (23), *Phoenix* wings (27) and
   *Cosmic Legend* (30).
@@ -169,8 +196,8 @@ marker on their tab. You can still switch to one yourself.
   on phones, where it opens as a drawer over the stage.
 - **The DJ** (desktop): a DJ booth above the crowd, beside the gallery, spinning along
   and bopping on the beat.
-- **The gallery predicts the final**: when two players are left, the show pauses for up to
-  14 seconds while everyone watching votes on who'll win, with live tallies. The finalists see
+- **The audience predicts the final**: when two players (or teams) are left, the show pauses for up to
+  14 seconds while everyone watching — the gallery and spectators — votes on who'll win, with live tallies. The finalists see
   a sign saying the audience is voting. Correct guessers get **+30 XP** (and the *Fortune
   Teller* / *Oracle* achievements) and are named on screen when the final ends.
 - **Mexican wave**: anyone in the green room or the gallery can press 🌊 Wave; when enough
@@ -210,5 +237,7 @@ In Docker the server starts as root only to fix ownership of `/data`, then runs 
 
 `BASE=localhost:3000 node test/accounts.js` exercises accounts with a software passkey
 (server on `localhost`, with a fresh data folder — it reserves the name "Jake").
+
+`BASE=localhost:3000 node test/teams.js` plays a team show with a spectator.
 
 `BASE=localhost:3000 node test/play.js` runs a scripted two-player + bots game against a running server (Node 22+). It expects a `Dubstep` folder with at least one MP3 in the music folder.

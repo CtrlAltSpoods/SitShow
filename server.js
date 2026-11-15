@@ -28,6 +28,8 @@ const AVATAR_MAX_BYTES = 200 * 1024;
 const WS_MAX_PAYLOAD = 16 * 1024;
 const MAX_ROOMS = 200;
 const MAX_PLAYERS = 30;
+const MAX_SPECTATORS = 40; // spectators sit in the audience and don't count towards the player limit
+const TEAM_MAX = 6;
 
 const T_INTRO = 3500;
 const T_RESULTS = 5200;
@@ -104,6 +106,7 @@ const CATALOG = {
     { id: 'chair', e: '🪑', level: 17 }, { id: 'goat', e: '🐐', level: 20 },
   ],
 };
+for (const list of Object.values(CATALOG)) list.sort((a, b) => a.level - b.level); // wardrobe shows things in unlock order
 const XP_BASE = 30;
 const xpForLevel = (L) => XP_BASE * L * (L - 1);
 const levelForXp = (xp) => Math.max(1, Math.floor((1 + Math.sqrt(1 + (4 * xp) / XP_BASE)) / 2));
@@ -341,7 +344,7 @@ function newRoomCode() {
 function hashPw(pw, salt) { return crypto.scryptSync(pw, salt, 32); }
 const defaultSettings = () => ({
   category: 'all', song: 'random', musicMin: 7, musicMax: 30, speed: false,
-  manual: false, scramble: 25, puzzles: Object.fromEntries(GROUPS.map((g) => [g.id, true])),
+  manual: false, scramble: 25, teams: false, puzzles: Object.fromEntries(GROUPS.map((g) => [g.id, true])),
 });
 function applySettings(room, m) {
   const s = room.settings;
@@ -357,6 +360,7 @@ function applySettings(room, m) {
   if ('musicMax' in m) { s.musicMax = clampInt(m.musicMax, 3, 90, s.musicMax); if (s.musicMin > s.musicMax) s.musicMin = s.musicMax; }
   if ('speed' in m) s.speed = !!m.speed;
   if ('manual' in m) s.manual = !!m.manual;
+  if ('teams' in m && room.phase === 'lobby') s.teams = !!m.teams;
   if ('scramble' in m) s.scramble = clampInt(m.scramble, 10, 60, s.scramble);
   if (m.puzzles && typeof m.puzzles === 'object') {
     for (const g of GROUPS) if (g.id in m.puzzles) s.puzzles[g.id] = !!m.puzzles[g.id];
@@ -383,6 +387,7 @@ function pubPlayer(p) {
     av: p.bot ? null : avatarOf(p.id)?.hash || null, face: p.face || null,
     dance: prof.dance, death: prof.death, ring: prof.ring,
     inGame: p.inGame, alive: p.alive, seat: p.seat, pick: p.pick, bot: !!p.bot, away: !p.bot && !p.conn, acct: !!prof.account,
+    spec: !!p.spec, team: p.team || null,
   };
 }
 function roomState(room) {
@@ -398,7 +403,8 @@ function roomState(room) {
       puzzle: room.phase === 'scramble' && !c.owner ? (c.kind === 'reaction' ? { ...c.pub, go: now >= c.goAt } : c.pub) : null,
     })),
     players: [...room.players.values()].map(pubPlayer),
-    out: room.lastOut, nobody: room.nobody, winner: room.winner, standings: room.standings,
+    out: room.lastOut, outNames: room.lastOutNames || null, nobody: room.nobody, winner: room.winner, winnerName: room.winnerName || null, standings: room.standings,
+    teamShow: !!room.teamShow, teams: [...room.teams.values()].map((t) => ({ id: t.id, name: t.name, leader: t.leader, members: teamMembers(room, t.id).map((p) => p.id) })),
     vote: room.phase === 'vote' ? voteTally(room) : null, voteResult: room.voteResult || null,
   };
 }
@@ -416,7 +422,7 @@ function lobbyList() {
   return {
     t: 'rooms',
     rooms: [...rooms.values()].filter((r) => r.vis === 'public').map((r) => ({
-      code: r.code, name: r.name, locked: !!r.pw, players: r.players.size, max: r.max,
+      code: r.code, name: r.name, locked: !!r.pw, players: contestants(r).length, max: r.max, watching: r.players.size - contestants(r).length, teams: !!r.settings.teams,
       playing: r.phase !== 'lobby', host: r.players.get(r.hostId)?.prof.name || '',
     })),
   };
@@ -439,8 +445,28 @@ function setPhaseTimer(room, ms, fn) {
 function clearChairTimers(room) { for (const t of room.chairTimers) clearTimeout(t); room.chairTimers = []; }
 const alivePlayers = (room) => [...room.players.values()].filter((p) => p.inGame && p.alive);
 const humans = (room) => [...room.players.values()].filter((p) => !p.bot);
-function passHost(room) { // give control to someone who is actually connected
-  const next = humans(room).find((h) => h.conn) || humans(room)[0];
+const contestants = (room) => [...room.players.values()].filter((p) => !p.spec);
+// ── teams ── In a team show each team is one "unit": it gets one chair, picked by its leader, and the first
+// member to solve that chair's challenge seats the whole team. Outside team shows everyone is their own unit.
+const teamMembers = (room, id) => [...room.players.values()].filter((p) => p.team === id);
+const unitKey = (room, p) => (room.teamShow && p.team ? p.team : p.id);
+function unitsOf(room, list) { const m = new Map(); for (const p of list) { const k = unitKey(room, p); if (!m.has(k)) m.set(k, []); m.get(k).push(p); } return [...m.values()]; }
+const aliveUnits = (room) => unitsOf(room, alivePlayers(room));
+const unitMates = (room, p) => alivePlayers(room).filter((x) => unitKey(room, x) === unitKey(room, p));
+function leaderOf(room, p) { // a team's leader — or whoever's still here if the leader dropped out
+  if (!room.teamShow || !p.team) return p;
+  const t = room.teams.get(p.team), mates = unitMates(room, p);
+  return mates.find((x) => x.id === t?.leader && x.conn) || mates.find((x) => x.conn) || mates.find((x) => x.id === t?.leader) || p;
+}
+const unitName = (room, p) => (room.teamShow && p.team && room.teams.get(p.team)?.name) || p.prof.name;
+function leaveTeam(room, p) {
+  const t = p.team && room.teams.get(p.team); p.team = null;
+  if (!t) return;
+  if (t.leader === p.id) { const next = teamMembers(room, t.id)[0]; if (next) t.leader = next.id; else room.teams.delete(t.id); }
+}
+function passHost(room) { // give control to someone who is actually connected (players before spectators)
+  const hs = humans(room).sort((a, b) => !!a.spec - !!b.spec);
+  const next = hs.find((h) => h.conn) || hs[0];
   if (next) room.hostId = next.id;
 }
 function resetSeats(room) {
@@ -450,16 +476,23 @@ function resetSeats(room) {
 function resetToLobby(room) {
   clearTimeout(room.timer); clearChairTimers(room);
   room.phase = 'lobby'; room.round = 0; room.chairs = []; room.currentSong = null; room.phaseEnds = 0;
-  room.lastOut = []; room.nobody = false; room.winner = null; room.standings = null; room.vote = null; room.voteResult = null;
+  room.lastOut = []; room.lastOutNames = null; room.nobody = false; room.winner = null; room.winnerName = null; room.standings = null; room.vote = null; room.voteResult = null;
+  room.teamShow = false;
   resetSeats(room);
   for (const p of room.players.values()) { p.inGame = false; p.alive = false; }
   pushState(room); pushLobby();
 }
 function startGame(room) {
-  if (room.phase !== 'lobby' || room.players.size < 2) return;
-  room.outOrder = []; room.winner = null; room.standings = null; room.round = 0; room.lastSong = null; room.vote = null; room.voteResult = null;
-  for (const p of room.players.values()) { p.inGame = true; p.alive = true; p.seats = 0; p.wrongs = 0; p.final = false; }
-  room.field = room.players.size;
+  if (room.phase !== 'lobby' || contestants(room).length < 2) return;
+  room.teamShow = !!room.settings.teams;
+  if (unitsOf(room, contestants(room)).length < 2) {
+    const host = room.players.get(room.hostId);
+    if (host && host.conn) host.conn.send({ t: 'toast', msg: 'You need at least two teams (or a team and a solo player) to start a team show.' });
+    room.teamShow = false; return;
+  }
+  room.outOrder = []; room.winner = null; room.winnerName = null; room.standings = null; room.round = 0; room.lastSong = null; room.vote = null; room.voteResult = null;
+  for (const p of room.players.values()) { const on = !p.spec; p.inGame = on; p.alive = on; p.seats = 0; p.wrongs = 0; p.final = false; }
+  room.field = contestants(room).length;
   resetSeats(room);
   const host = room.players.get(room.hostId);
   if (host) { bump(host, (st) => st.hosted++); award(host); }
@@ -476,9 +509,9 @@ function pickSong(room) {
 }
 // Before the final, the gallery predicts the winner. Anyone watching (knocked out, or joined late) can vote.
 const voters = (room) => [...room.players.values()].filter((p) => !p.bot && p.conn && !(p.inGame && p.alive));
-function startVote(room, finalists) {
+function startVote(room, finalists) { // finalists: two units; each is voted for by its leader's id
   room.phase = 'vote';
-  room.vote = { candidates: finalists.map((p) => p.id), votes: new Map(), done: false };
+  room.vote = { candidates: finalists.map((u) => leaderOf(room, u[0]).id), votes: new Map(), done: false };
   room.chairs = [];
   resetSeats(room);
   setPhaseTimer(room, T_VOTE, () => finishVote(room));
@@ -497,15 +530,15 @@ function voteTally(room) {
   return { candidates: room.vote.candidates, counts, total: room.vote.votes.size, voters: voters(room).length };
 }
 function beginRound(room) {
-  const alive = alivePlayers(room);
+  const alive = aliveUnits(room); // teams count as one
   if (alive.length <= 1) return endGame(room);
   if (alive.length === 2 && !room.vote && voters(room).length) return startVote(room, alive);
   room.round++;
-  room.lastOut = []; room.nobody = false;
+  room.lastOut = []; room.lastOutNames = null; room.nobody = false;
   resetSeats(room);
   // big shows lose about a sixth of the field per round, so 30 players still finish in ~12 rounds
   const drop = alive.length >= 8 ? Math.max(2, Math.round(alive.length / 6)) : 1;
-  if (alive.length === 2) for (const p of alive) p.final = true;
+  if (alive.length === 2) for (const u of alive) for (const p of u) p.final = true;
   room.chairs = Array.from({ length: Math.max(1, alive.length - drop) }, () => ({ owner: null, pub: null, answer: null, kind: 'answer' }));
   room.currentSong = room.lastSong = pickSong(room);
   room.phase = 'intro';
@@ -539,20 +572,24 @@ function startScramble(room) {
   pushState(room);
   for (const p of room.players.values()) if (p.bot && p.alive) botThink(room, p, 900 + Math.random() * 1200);
 }
-function claimChair(room, p, i) {
+function claimChair(room, p, i) { // p solved it; in a team show the whole team sits
   const chair = room.chairs[i];
   if (!chair || chair.owner || p.seat != null) return false;
-  chair.owner = p.id; p.seat = i; p.pick = i; p.seats++;
-  sendRoom(room, { t: 'claim', id: p.id, chair: i });
-  if (!p.bot) {
-    const dt = Date.now() - room.scrambleAt, cat = (chair.pub && chair.pub.cat) || '';
-    bump(p, (st) => {
+  const mates = unitMates(room, p), lead = leaderOf(room, p);
+  chair.owner = lead.id;
+  for (const m of mates) { m.seat = i; m.pick = i; m.seats++; }
+  sendRoom(room, { t: 'claim', id: lead.id, ids: mates.map((m) => m.id), by: p.id, chair: i });
+  const dt = Date.now() - room.scrambleAt, cat = (chair.pub && chair.pub.cat) || '';
+  for (const m of mates) {
+    if (m.bot) continue;
+    bump(m, (st) => {
       st.seats++;
+      if (m !== p) return; // speed and category records go to whoever actually solved it
       if (!st.fastest || dt < st.fastest) st.fastest = dt;
       if (cat.startsWith('Trivia')) st.trivia++;
       if (cat === 'Action games') st.action++;
     });
-    award(p);
+    award(m);
   }
   pushState(room);
   checkScrambleDone(room);
@@ -578,15 +615,17 @@ function endScramble(room) {
   if (!seated.length) { // nobody solved anything: replay the round
     room.nobody = true; room.lastOut = []; room.round--;
   } else {
-    const losers = alive.filter((p) => p.seat == null);
-    for (const p of losers) { p.alive = false; p.pick = null; room.outOrder.push({ id: p.id, name: p.prof.name }); }
+    const losers = alive.filter((p) => p.seat == null), lost = unitsOf(room, losers);
+    for (const u of lost) room.outOrder.push({ id: leaderOf(room, u[0]).id, name: unitName(room, u[0]) });
+    for (const p of losers) { p.alive = false; p.pick = null; }
     room.lastOut = losers.map((p) => p.id);
+    room.lastOutNames = lost.map((u) => unitName(room, u[0]));
   }
   setPhaseTimer(room, room.lastOut.length ? T_RESULTS : 2600, () => afterResults(room));
   pushState(room);
 }
 function afterResults(room) {
-  if (alivePlayers(room).length <= 1) return endGame(room);
+  if (aliveUnits(room).length <= 1) return endGame(room);
   if (room.settings.manual) { // wait for the host to press "Start round"
     clearTimeout(room.timer);
     room.phase = 'ready'; room.phaseEnds = 0; room.chairs = []; room.lastOut = [];
@@ -597,10 +636,11 @@ function afterResults(room) {
 }
 function endGame(room) {
   clearTimeout(room.timer); clearChairTimers(room);
-  const winner = alivePlayers(room)[0] || null;
+  const winners = aliveUnits(room)[0] || [], winner = winners.length ? leaderOf(room, winners[0]) : null;
   room.phase = 'gameover';
   room.winner = winner ? winner.id : null;
-  room.standings = [...(winner ? [{ id: winner.id, name: winner.prof.name }] : []), ...room.outOrder.slice().reverse()].slice(0, 12);
+  room.winnerName = winner ? unitName(room, winner) : null;
+  room.standings = [...(winner ? [{ id: winner.id, name: room.winnerName }] : []), ...room.outOrder.slice().reverse()].slice(0, 12);
   room.chairs = [];
   // gallery predictions
   const predicted = new Map(); // voter id -> correct?
@@ -624,7 +664,8 @@ function endGame(room) {
       award(p);
       continue;
     }
-    const gained = 15 + 12 * (p.seats || 0) + (winner === p ? 50 : 0) + (called ? VOTE_BONUS : 0);
+    const won = winners.includes(p);
+    const gained = 15 + 12 * (p.seats || 0) + (won ? 50 : 0) + (called ? VOTE_BONUS : 0);
     p.prof.xp += gained;
     const after = levelForXp(p.prof.xp);
     const unlocked = [];
@@ -633,7 +674,7 @@ function endGame(room) {
         if (it.level > before && it.level <= after) unlocked.push({ kind, name: it.name || it.e });
       }
     }
-    const won = winner === p, st = p.prof.stats, day = today();
+    const st = p.prof.stats, day = today();
     st.games++;
     if (won) { st.wins++; st.streak++; st.bestStreak = Math.max(st.bestStreak, st.streak); if (!p.wrongs) st.flawless++; }
     else st.streak = 0;
@@ -670,7 +711,7 @@ function botThink(room, bot, delay) {
   }, delay);
 }
 function addBot(room) {
-  if (room.players.size >= room.max || room.phase !== 'lobby') return;
+  if (contestants(room).length >= room.max || room.phase !== 'lobby') return;
   const used = new Set([...room.players.values()].map((p) => p.prof.name));
   const name = BOT_NAMES.find((n) => !used.has(n)) || 'Bot ' + (1 + rnd(999));
   const id = 'bot' + crypto.randomBytes(4).toString('hex');
@@ -694,17 +735,22 @@ function destroyRoom(room) {
 function removePlayer(room, p) {
   if (!p) return;
   clearTimeout(p.timer); clearTimeout(p.awayTimer);
+  const mates = p.inGame && p.alive ? unitMates(room, p).filter((x) => x !== p) : [];
   room.players.delete(p.id);
   if (p.conn && p.conn.room === room) p.conn.room = null;
   if (p.inGame && p.alive && room.phase !== 'lobby' && room.phase !== 'gameover') {
     p.alive = false;
-    room.outOrder.push({ id: p.id, name: p.prof.name });
+    if (!mates.length) room.outOrder.push({ id: p.id, name: unitName(room, p) }); // teammates play on without them
   }
-  if (!humans(room).length) return destroyRoom(room);
+  leaveTeam(room, p);
+  if (!humans(room).filter((h) => !h.spec).length) { // only spectators left: the show's over
+    for (const s of room.players.values()) if (s.conn) { s.conn.room = null; s.conn.send({ t: 'toast', msg: 'Everyone in that show has left.' }); s.conn.send({ t: 'left' }); s.conn.send(lobbyList()); }
+    return destroyRoom(room);
+  }
   if (room.hostId === p.id) passHost(room);
   pushState(room); pushLobby();
   if (room.phase === 'lobby' || room.phase === 'gameover') return;
-  if (alivePlayers(room).length <= 1 && room.phase !== 'results') return endGame(room);
+  if (aliveUnits(room).length <= 1 && room.phase !== 'results') return endGame(room);
   checkScrambleDone(room);
 }
 function attach(conn, room, p) { // (re)connect a socket to its seat in a room
@@ -716,9 +762,9 @@ function attach(conn, room, p) { // (re)connect a socket to its seat in a room
   conn.send({ t: 'chatHistory', list: room.chat });
   pushState(room); pushLobby();
 }
-function joinRoom(conn, room) {
+function joinRoom(conn, room, spec = false) {
   if (conn.room && conn.room !== room) removePlayer(conn.room, conn.room.players.get(conn.pid));
-  const p = { id: conn.pid, conn: null, prof: conn.prof, inGame: false, alive: false, seat: null, pick: null, seats: 0, lockUntil: 0, awayTimer: null };
+  const p = { id: conn.pid, conn: null, prof: conn.prof, inGame: false, alive: false, seat: null, pick: null, seats: 0, lockUntil: 0, awayTimer: null, spec, team: null };
   room.players.set(conn.pid, p);
   attach(conn, room, p);
 }
@@ -735,7 +781,7 @@ const handlers = {
       max: Math.min(MAX_PLAYERS, Math.max(2, m.max | 0 || 8)), players: new Map(), hostId: conn.pid, ownerId: conn.pid,
       phase: 'lobby', round: 0, chairs: [], currentSong: null, lastSong: null, settings: defaultSettings(),
       lastOut: [], outOrder: [], nobody: false, winner: null, standings: null, phaseEnds: 0, musicStart: 0,
-      banned: new Set(), usedQ: new Set(), chairTimers: [], chat: [],
+      banned: new Set(), usedQ: new Set(), chairTimers: [], chat: [], teams: new Map(), teamShow: false,
     };
     if (pw) { const salt = crypto.randomBytes(16); room.pw = { salt, hash: hashPw(pw, salt) }; }
     rooms.set(room.code, room);
@@ -746,9 +792,9 @@ const handlers = {
     const room = rooms.get(code);
     if (!room) return conn.send({ t: 'peek', code, found: false });
     conn.send({
-      t: 'peek', code, found: true, name: room.name, players: room.players.size, max: room.max,
+      t: 'peek', code, found: true, name: room.name, players: contestants(room).length, max: room.max,
       locked: !!room.pw && conn.pid !== room.ownerId, playing: room.phase !== 'lobby',
-      host: room.players.get(room.hostId)?.prof.name || '', member: room.players.has(conn.pid),
+      host: room.players.get(room.hostId)?.prof.name || '', member: room.players.has(conn.pid), watching: room.players.size - contestants(room).length,
     });
   },
   joinRoom(conn, m) {
@@ -762,7 +808,8 @@ const handlers = {
       return attach(conn, room, existing);
     }
     if (room.banned.has(conn.pid)) return conn.send({ t: 'joinfail', reason: 'kicked', code });
-    if (room.players.size >= room.max) return conn.send({ t: 'joinfail', reason: 'full', code });
+    const spec = !!m.spectate;
+    if (spec ? room.players.size - contestants(room).length >= MAX_SPECTATORS : contestants(room).length >= room.max) return conn.send({ t: 'joinfail', reason: 'full', code });
     if (room.pw && conn.pid !== room.ownerId) {
       const pw = String(m.password || '').slice(0, 64);
       if (!pw) return conn.send({ t: 'joinfail', reason: 'password', code, name: room.name });
@@ -770,7 +817,51 @@ const handlers = {
       if (!crypto.timingSafeEqual(hashPw(pw, room.pw.salt), room.pw.hash)) return conn.send({ t: 'joinfail', reason: 'badpw', code, name: room.name });
       conn.pwFails = 0;
     }
-    joinRoom(conn, room);
+    joinRoom(conn, room, spec);
+  },
+  spectate(conn, m) { // in the green room: switch between playing and just watching
+    const room = conn.room; if (!room || room.phase !== 'lobby') return;
+    const p = room.players.get(conn.pid); if (!p) return;
+    const on = !!m.on;
+    if (on === !!p.spec) return;
+    if (on && humans(room).filter((h) => !h.spec && h !== p).length === 0) return conn.send({ t: 'toast', msg: 'Someone has to play! Invite a friend first.' });
+    if (!on && contestants(room).length >= room.max) return conn.send({ t: 'toast', msg: 'The show is full.' });
+    p.spec = on; if (on) leaveTeam(room, p);
+    if (on && room.hostId === p.id) passHost(room);
+    pushState(room); pushLobby();
+  },
+
+  // ── teams (green room only) ──
+  teamCreate(conn, m) {
+    const room = conn.room; if (!room || room.phase !== 'lobby') return;
+    const p = room.players.get(conn.pid); if (!p || p.spec) return;
+    leaveTeam(room, p);
+    const name = cleanText(m.name, 20) || `${p.prof.name}'s team`;
+    if ([...room.teams.values()].some((t) => t.name.toLowerCase() === name.toLowerCase())) return conn.send({ t: 'toast', msg: 'There\'s already a team called that.' });
+    const t = { id: 't' + crypto.randomBytes(4).toString('hex'), name, leader: p.id };
+    room.teams.set(t.id, t); p.team = t.id;
+    pushState(room);
+  },
+  teamJoin(conn, m) {
+    const room = conn.room; if (!room || room.phase !== 'lobby') return;
+    const p = room.players.get(conn.pid), t = room.teams.get(String(m.id || ''));
+    if (!p || p.spec || !t || p.team === t.id) return;
+    if (teamMembers(room, t.id).length >= TEAM_MAX) return conn.send({ t: 'toast', msg: `${t.name} is full (${TEAM_MAX} max).` });
+    leaveTeam(room, p); p.team = t.id;
+    pushState(room);
+  },
+  teamLeave(conn) {
+    const room = conn.room; if (!room || room.phase !== 'lobby') return;
+    const p = room.players.get(conn.pid); if (!p || !p.team) return;
+    leaveTeam(room, p); pushState(room);
+  },
+  teamRename(conn, m) {
+    const room = conn.room; if (!room || room.phase !== 'lobby') return;
+    const p = room.players.get(conn.pid), t = p && p.team && room.teams.get(p.team);
+    const name = cleanText(m.name, 20);
+    if (!t || t.leader !== p.id || !name) return;
+    if ([...room.teams.values()].some((x) => x !== t && x.name.toLowerCase() === name.toLowerCase())) return conn.send({ t: 'toast', msg: 'There\'s already a team called that.' });
+    t.name = name; pushState(room);
   },
   leaveRoom(conn) {
     if (!conn.room) return;
@@ -917,12 +1008,15 @@ const handlers = {
     const room = conn.room; if (!room || room.phase !== 'scramble') return;
     const p = room.players.get(conn.pid); const i = m.chair | 0;
     if (!p || !p.alive || p.seat != null || !room.chairs[i] || room.chairs[i].owner || p.pick === i) return;
-    p.pick = i; pushState(room);
+    if (leaderOf(room, p) !== p) return conn.send({ t: 'toast', msg: 'Only your team leader can switch chairs.' });
+    for (const x of unitMates(room, p)) x.pick = i; // the whole team works on the leader's chair
+    pushState(room);
   },
   answer(conn, m) {
     const room = conn.room; if (!room || room.phase !== 'scramble') return;
     const p = room.players.get(conn.pid); const i = m.chair | 0; const chair = room.chairs[i];
     if (!p || !p.alive || p.seat != null || !chair || chair.owner || chair.kind !== 'answer') return;
+    if (room.teamShow && p.team && p.pick !== i) return; // teams can only work on their leader's chair
     if (Date.now() < p.lockUntil) return;
     if (normAnswer(m.a) === chair.answer) return void claimChair(room, p, i);
     wrongAnswer(room, p, i);
@@ -931,6 +1025,7 @@ const handlers = {
     const room = conn.room; if (!room || room.phase !== 'scramble') return;
     const p = room.players.get(conn.pid); const i = m.chair | 0; const chair = room.chairs[i];
     if (!p || !p.alive || p.seat != null || !chair || chair.owner) return;
+    if (room.teamShow && p.team && p.pick !== i) return;
     const now = Date.now();
     if (now < p.lockUntil) return;
     if (chair.kind === 'reaction') {

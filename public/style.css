@@ -480,3 +480,22 @@ select option { color: #111; }
   .bulbs, .chip.onair.live, .timer.low, .curtain i, .stage-btn, .pz-pad.go { animation: none !important; }
   .banner-main.pop { animation: none; }
 }
+
+/* spectators + teams */
+.btn.tiny { padding: 2px 8px; font-size: .68rem; margin-left: auto; float: right; }
+.players.specs li { padding: 3px 8px; }
+.players .team-chip { font-size: .62rem; background: rgba(25,227,201,.18); color: var(--teal); border-radius: 6px; padding: 1px 5px; white-space: nowrap; max-width: 90px; overflow: hidden; text-overflow: ellipsis; }
+.team-box { background: rgba(25,227,201,.07); border: 2px dashed rgba(25,227,201,.4); border-radius: 12px; padding: 10px; display: grid; gap: 8px; margin-top: 10px; }
+.team-box h3 { font-size: .8rem; color: var(--teal); }
+.team-box .hint { margin: 0; }
+.team-card { background: rgba(0,0,0,.28); border-radius: 10px; padding: 7px 9px; display: grid; gap: 5px; }
+.team-card.mine { box-shadow: inset 0 0 0 2px var(--teal); }
+.team-card .th { display: flex; align-items: center; gap: 6px; }
+.team-card .th strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.team-card .tm { display: flex; flex-wrap: wrap; gap: 4px; font-size: .74rem; opacity: .85; }
+.team-card .tm span { background: rgba(255,255,255,.08); border-radius: 6px; padding: 1px 6px; }
+.team-new { display: flex; gap: 6px; }
+.team-new input { flex: 1; min-width: 0; }
+.room-item .ri-btns { display: flex; gap: 6px; }
+.pz-team { font-size: .75rem; color: var(--teal); margin: -2px 0 4px; }
+.chair-tabs button:disabled { cursor: not-allowed; }

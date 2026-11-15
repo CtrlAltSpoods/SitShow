@@ -173,8 +173,10 @@ const on = {
     Snd.sfx('wave');
   },
   claim(m) {
-    Snd.sfx(m.id === S.me.id ? 'win' : 'ding');
-    const e = ents.get(m.id); if (e) e.claimAt = performance.now();
+    const ids = m.ids || [m.id];
+    Snd.sfx(ids.includes(S.me.id) ? 'win' : 'ding');
+    if (m.by && m.by !== S.me.id && ids.includes(S.me.id) && ids.length > 1) toast(`🙌 ${nameOf(S.room, m.by)} solved it — your team is safe!`, 'good', 2500);
+    for (const id of ids) { const e = ents.get(id); if (e) e.claimAt = performance.now(); }
   },
   wrong(m) {
     S.lockUntil = performance.now() + m.lock;
@@ -204,13 +206,14 @@ const on = {
     toast(box, 'good', m.leveled ? 8000 : 4500);
   },
 };
-function joinRoom(code, pw) {
+function joinRoom(code, pw, spectate) {
   code = String(code).toUpperCase();
   if (pw != null) S.pw[code] = pw;
-  send({ t: 'joinRoom', code, password: S.pw[code] || '' });
+  if (spectate != null) S.spectate = spectate;
+  send({ t: 'joinRoom', code, password: S.pw[code] || '', spectate: !!S.spectate });
 }
 function leaveLocal() {
-  S.room = null; wantRoom = null; S.invite = null; ents.clear(); Snd.stop();
+  S.room = null; wantRoom = null; S.invite = null; S.spectate = false; ents.clear(); Snd.stop();
   SS.del('sitshow.room');
   history.replaceState(null, '', '/');
   show('home');
@@ -241,13 +244,15 @@ function showInvite(m) {
   $('invErr').hidden = true;
   show('invite');
 }
-$('inviteForm').addEventListener('submit', (e) => {
-  e.preventDefault(); Snd.unlock();
+function inviteJoin(spectate) {
+  Snd.unlock();
   const m = S.invite; if (!m) return;
   const name = $('invNameInput').value.trim();
   if (name && name !== S.me.name) { LS.set('sitshow.name', name); send({ t: 'setName', name }); }
-  joinRoom(m.code, $('invPwField').hidden ? undefined : $('invPw').value);
-});
+  joinRoom(m.code, $('invPwField').hidden ? undefined : $('invPw').value, spectate);
+}
+$('inviteForm').addEventListener('submit', (e) => { e.preventDefault(); inviteJoin(false); });
+$('invSpectate').addEventListener('click', () => inviteJoin(true));
 $('invBack').addEventListener('click', leaveLocal);
 
 function setAvatarEl(node, p, localUrl) {
@@ -278,8 +283,10 @@ function renderRoomList() {
     list.append(el('div', { class: 'room-item' },
       el('div', { class: 'ri-main' },
         el('strong', { text: (r.locked ? '🔒 ' : '') + r.name }),
-        el('small', { text: `Host: ${r.host} · ${r.players}/${r.max} · ${r.playing ? 'show in progress' : 'in the green room'}` })),
-      el('button', { class: 'btn small gold', text: r.players >= r.max ? 'Full' : 'Join', disabled: r.players >= r.max, onclick: () => { Snd.unlock(); joinRoom(r.code); } })));
+        el('small', { text: `Host: ${r.host} · ${r.players}/${r.max}${r.watching ? ` · 👀 ${r.watching}` : ''}${r.teams ? ' · 🚩 teams' : ''} · ${r.playing ? 'show in progress' : 'in the green room'}` })),
+      el('div', { class: 'ri-btns' },
+        el('button', { class: 'btn small ghost', text: '👀 Spectate', title: 'Watch from the audience — you can still vote in the final', onclick: () => { Snd.unlock(); joinRoom(r.code, undefined, true); } }),
+        el('button', { class: 'btn small gold', text: r.players >= r.max ? 'Full' : 'Join', disabled: r.players >= r.max, onclick: () => { Snd.unlock(); joinRoom(r.code, undefined, false); } }))));
   }
 }
 
@@ -294,7 +301,7 @@ $('createForm').addEventListener('submit', (e) => {
 for (const r of $$('input[name=vis]')) r.addEventListener('change', () => {
   $('visHint').textContent = r.value === 'private' && r.checked ? 'Private shows are unlisted — only people with the invite link or code can join.' : 'Public shows are listed for everyone.';
 });
-$('codeForm').addEventListener('submit', (e) => { e.preventDefault(); Snd.unlock(); const c = $('codeInput').value.trim(); if (c) joinRoom(c); });
+$('codeForm').addEventListener('submit', (e) => { e.preventDefault(); Snd.unlock(); const c = $('codeInput').value.trim(); if (c) joinRoom(c, undefined, false); });
 $('pwForm').addEventListener('submit', (e) => { e.preventDefault(); if (S.pendingCode) joinRoom(S.pendingCode, $('pwInput').value); });
 $('leaveBtn').addEventListener('click', () => send({ t: 'leaveRoom' }));
 $('nameBtn').addEventListener('click', () => { $('nameInput').value = S.me.name; openModal('nameModal'); $('nameInput').select(); });
@@ -769,6 +776,16 @@ function banner(main, sub = '', cls = '') {
   $('bannerSub').textContent = sub;
 }
 const nameOf = (r, id) => r.byId.get(id)?.name || r.standings?.find((s) => s.id === id)?.name || 'Someone';
+// teams: in a team show (or a lobby with teams switched on) a team moves, sits and is named as one
+const teamsOn = (r) => (r.phase === 'lobby' ? r.settings.teams : r.teamShow);
+const teamById = (r, id) => r.teams.find((t) => t.id === id);
+const unitOf = (r, p) => (teamsOn(r) && p.team ? p.team : p.id);
+const unitLabel = (r, id) => { const p = r.byId.get(id), t = p && teamsOn(r) && p.team && teamById(r, p.team); return t ? t.name : nameOf(r, id); };
+function myLeader(r) { // the teammate who picks chairs for me (myself if solo)
+  const me = r.byId.get(S.me.id); if (!me || !r.teamShow || !me.team) return me;
+  const t = teamById(r, me.team), mates = r.players.filter((p) => p.team === me.team && p.alive);
+  return mates.find((p) => p.id === t?.leader && !p.away) || mates.find((p) => !p.away) || me;
+}
 function onPhase(r, prev) {
   const alive = r.players.filter((p) => p.inGame && p.alive);
   $('stageWrap').classList.toggle('cinema', r.phase === 'results' && r.out.length > 0);
@@ -785,7 +802,7 @@ function onPhase(r, prev) {
     case 'vote': {
       preRoundBed(r); Snd.sfx('drum');
       const me = r.byId.get(S.me.id), finalist = me && me.inGame && me.alive;
-      if (finalist) banner('THE GALLERY IS VOTING', 'The audience is predicting who will win the final…', 'teal');
+      if (finalist) banner('THE AUDIENCE IS VOTING', 'Everyone watching is predicting who will win the final…', 'teal');
       else banner('WHO WILL WIN?', `Predict the champion — +${30} XP if you call it`, 'teal');
       break;
     }
@@ -795,7 +812,8 @@ function onPhase(r, prev) {
       break;
     case 'intro':
       preRoundBed(r); Snd.prep(roundSong(r)); Snd.sfx('drum');
-      banner(alive.length === 2 ? 'THE FINAL!' : 'ROUND ' + r.round, `${alive.length} contestants · ${r.chairs.length} chair${r.chairs.length > 1 ? 's' : ''}`);
+      { const units = new Set(alive.map((p) => unitOf(r, p))).size;
+        banner(units === 2 ? 'THE FINAL!' : 'ROUND ' + r.round, `${units} ${r.teamShow ? 'teams' : 'contestants'} · ${r.chairs.length} chair${r.chairs.length > 1 ? 's' : ''}`); }
       break;
     case 'music':
       startMusic(r);
@@ -812,8 +830,9 @@ function onPhase(r, prev) {
       if (r.nobody) { banner('NOBODY SAT DOWN!', "Let's try that again…", 'teal'); break; }
       const now = performance.now();
       for (const id of r.out) { const e = ents.get(id); if (e) { e.deathAt = now; e.deathKind = r.byId.get(id)?.death || 'poof'; } }
-      if (r.out.length > 3) { Snd.sfx('out'); banner(`${r.out.length} CONTESTANTS ARE OUT!`, r.out.map((id) => nameOf(r, id)).join(' · '), 'red'); }
-      else if (r.out.length) { Snd.sfx('out'); banner(r.out.map((id) => nameOf(r, id)).join(' & ') + (r.out.length > 1 ? ' ARE OUT!' : ' IS OUT!'), '', 'red'); }
+      const outN = r.outNames || r.out.map((id) => nameOf(r, id));
+      if (outN.length > 3) { Snd.sfx('out'); banner(`${outN.length} ${r.teamShow ? 'TEAMS' : 'CONTESTANTS'} ARE OUT!`, outN.join(' · '), 'red'); }
+      else if (outN.length) { Snd.sfx('out'); banner(outN.join(' & ') + (outN.length > 1 ? ' ARE OUT!' : ' IS OUT!'), '', 'red'); }
       else banner('EVERYBODY SURVIVES!', '', 'teal');
       break;
     }
@@ -821,7 +840,7 @@ function onPhase(r, prev) {
       Snd.stop(); Snd.sfx('fanfare');
       setTimeout(() => { if (S.room && /gameover|lobby/.test(S.room.phase)) preRoundBed(S.room); }, 2400);
       setTimeout(() => send({ t: 'leaderboard' }), 1200);
-      banner(r.winner ? `🏆 ${nameOf(r, r.winner)} WINS!` : 'NOBODY WINS!', (r.standings || []).slice(1, 3).map((s, i) => `${i + 2}. ${s.name}`).join('  ·  '));
+      banner(r.winner ? `🏆 ${r.winnerName || nameOf(r, r.winner)} WIN${r.teamShow && r.teams.some((t) => t.name === r.winnerName) ? '' : 'S'}!` : 'NOBODY WINS!', (r.standings || []).slice(1, 3).map((s, i) => `${i + 2}. ${s.name}`).join('  ·  '));
       spawnConfetti();
       break;
   }
@@ -834,13 +853,49 @@ function onRoomUpdate(r) {
   if (S.createPw && r.hostId === S.me.id && !S.pw[r.code]) S.pw[r.code] = S.createPw;
   S.createPw = null;
   $('invitePwBtn').hidden = !(r.locked && S.pw[r.code]) || S.streamer;
-  const me = r.byId.get(S.me.id);
-  if (r.phase === 'scramble' && me && me.alive && me.seat == null && (S.myPick == null || r.chairs[S.myPick]?.owner)) autoPick();
-  const amHost = r.hostId === S.me.id, sb = $('stageBtn');
+  const me = r.byId.get(S.me.id), lead = myLeader(r);
+  if (r.phase === 'scramble' && me && me.alive && me.seat == null) {
+    if (lead && lead !== me) { if (lead.pick != null && S.myPick !== lead.pick) { S.myPick = lead.pick; pzKey = ''; } }
+    else if (S.myPick == null || r.chairs[S.myPick]?.owner) autoPick();
+  }
+  const amHost = r.hostId === S.me.id, sb = $('stageBtn'), nPlay = r.players.filter((p) => !p.spec).length;
   if (amHost && r.phase === 'ready') { sb.hidden = false; sb.textContent = `▶ Start round ${r.round + 1}`; sb.onclick = () => send({ t: 'nextRound' }); }
-  else if (amHost && r.phase === 'lobby' && r.players.length >= 2) { sb.hidden = false; sb.textContent = '▶ Start the show'; sb.onclick = () => send({ t: 'start' }); }
+  else if (amHost && r.phase === 'lobby' && nPlay >= 2) { sb.hidden = false; sb.textContent = '▶ Start the show'; sb.onclick = () => send({ t: 'start' }); }
   else sb.hidden = true;
-  renderPlayers(r); renderHost(); renderPuzzle(); renderChatState(r); renderVote(r);
+  renderPlayers(r); renderHost(); renderTeams(r); renderPuzzle(); renderChatState(r); renderVote(r);
+}
+// ── teams panel (green room) ──
+let teamKey = '';
+function renderTeams(r) {
+  const box = $('teamBox'), me = r.byId.get(S.me.id);
+  const show = r.settings.teams && r.phase === 'lobby' && me && !me.spec;
+  box.hidden = !show;
+  if (!show) { teamKey = ''; return; }
+  const key = JSON.stringify([r.teams, r.players.map((p) => [p.id, p.name, p.team]), S.me.id]);
+  if (key === teamKey) return;
+  const typing = box.contains(document.activeElement) && document.activeElement.tagName === 'INPUT';
+  if (typing) return; // don't wipe a name someone's typing
+  teamKey = key; box.textContent = '';
+  const mine = me.team && teamById(r, me.team);
+  box.append(el('h3', { text: '🚩 Teams' }),
+    el('p', { class: 'hint', text: 'Each team shares one chair: the leader picks it, and the first teammate to solve it seats the whole team. Players without a team play solo.' }));
+  for (const t of r.teams) {
+    const members = r.players.filter((p) => p.team === t.id), isMine = me.team === t.id, lead = t.leader === S.me.id;
+    const head = el('div', { class: 'th' }, el('strong', { text: t.name }), el('small', { text: `${members.length}/6` }));
+    if (isMine && lead) head.append(el('button', { class: 'btn tiny ghost', title: 'Rename your team', text: '✏️', onclick: () => {
+      const n = prompt('Team name', t.name); if (n && n.trim()) send({ t: 'teamRename', name: n.trim() });
+    } }));
+    if (isMine) head.append(el('button', { class: 'btn tiny ghost', text: 'Leave', onclick: () => send({ t: 'teamLeave' }) }));
+    else head.append(el('button', { class: 'btn tiny', text: 'Join', disabled: members.length >= 6, onclick: () => send({ t: 'teamJoin', id: t.id }) }));
+    box.append(el('div', { class: 'team-card' + (isMine ? ' mine' : '') }, head,
+      el('div', { class: 'tm' }, ...members.map((p) => el('span', { text: (p.id === t.leader ? '👑 ' : '') + p.name })))));
+  }
+  if (!mine || mine.leader !== S.me.id || r.players.filter((p) => p.team === mine.id).length > 1) {
+    const inp = el('input', { maxlength: 20, placeholder: 'Team name', 'aria-label': 'New team name' });
+    const go = () => { send({ t: 'teamCreate', name: inp.value.trim() }); inp.value = ''; inp.blur(); };
+    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
+    box.append(el('div', { class: 'team-new' }, inp, el('button', { class: 'btn small', text: mine ? 'Start a new team' : 'Create team', onclick: go })));
+  }
 }
 // ── final-round prediction: voters pick, finalists see a sign, everyone sees the tally ──
 function renderVote(r) {
@@ -872,16 +927,24 @@ function renderVote(r) {
     const av = el('span', { class: 'avatar' }); setAvatarEl(av, p, p.id === S.me.id ? LS.get('sitshow.avatar') : null);
     cands.append(el('button', { type: 'button', class: 'vote-cand' + (mine === id ? ' mine' : ''), disabled: finalist,
       onclick: () => { S.myVote = { round: r.round, id }; send({ t: 'vote', id }); renderVote(S.room); } },
-      av, el('span', { text: p.name }), el('span', { class: 'pct', text: `${v.counts[id]} vote${v.counts[id] === 1 ? '' : 's'} · ${pct}%` }), el('i', { class: 'bar', style: `width:${pct}%` })));
+      av, el('span', { text: unitLabel(r, id) }), el('span', { class: 'pct', text: `${v.counts[id]} vote${v.counts[id] === 1 ? '' : 's'} · ${pct}%` }), el('i', { class: 'bar', style: `width:${pct}%` })));
   }
-  panel.append(cands, el('p', { style: 'margin:10px 0 0;font-size:.8rem', text: `${v.total} of ${v.voters} in the gallery have voted` }));
+  panel.append(cands, el('p', { style: 'margin:10px 0 0;font-size:.8rem', text: `${v.total} of ${v.voters} watching have voted` }));
 }
 
 function renderPlayers(r) {
-  const ul = $('playerList'); ul.textContent = '';
-  $('playerCount').textContent = `${r.players.length}/${r.max}`;
+  const ul = $('playerList'), sl = $('specList'); ul.textContent = ''; sl.textContent = '';
+  const players = r.players.filter((p) => !p.spec), specs = r.players.filter((p) => p.spec), me = r.byId.get(S.me.id);
+  if (teamsOn(r)) players.sort((a, b) => (a.team || '~' + a.id).localeCompare(b.team || '~' + b.id));
+  $('playerCount').textContent = `${players.length}/${r.max}`;
+  $('specWrap').hidden = !specs.length; $('specCount').textContent = specs.length;
+  const tg = $('specToggle'), canToggle = r.phase === 'lobby' && me;
+  tg.hidden = !canToggle;
+  if (canToggle) { tg.textContent = me.spec ? '🎮 Play' : '👀 Just watch'; tg.title = me.spec ? 'Join the next show as a contestant' : 'Watch from the audience instead of playing'; tg.onclick = () => send({ t: 'spectate', on: !me.spec }); }
   const playing = r.phase !== 'lobby', amHost = r.hostId === S.me.id;
-  for (const p of r.players) {
+  const order = [...players, ...specs];
+  for (const p of order) {
+    const target = p.spec ? sl : ul;
     let status = '';
     if (p.away) status = '📡';
     else if (p.id === r.winner) status = '🏆';
@@ -889,8 +952,10 @@ function renderPlayers(r) {
     else if (playing) status = '👀';
     const av = el('span', { class: 'avatar' }); setAvatarEl(av, p, p.id === S.me.id ? LS.get('sitshow.avatar') : null);
     const canKick = amHost && p.id !== S.me.id && p.id !== r.ownerId;
-    ul.append(el('li', { class: (p.id === S.me.id ? 'me ' : '') + (playing && p.inGame && !p.alive ? 'out ' : '') + (p.away ? 'away' : ''), title: p.away ? 'Reconnecting…' : '' },
+    const tm = !p.spec && teamsOn(r) && p.team && teamById(r, p.team);
+    target.append(el('li', { class: (p.id === S.me.id ? 'me ' : '') + (playing && p.inGame && !p.alive ? 'out ' : '') + (p.away ? 'away' : ''), title: p.away ? 'Reconnecting…' : '' },
       av, el('span', { class: 'pn' + (p.bot ? '' : ' clickable'), title: p.bot ? '' : 'View player card', onclick: p.bot ? null : () => openCard(p.id), text: (p.id === r.hostId ? '👑 ' : '') + p.name }, p.acct && el('span', { class: 'acct-tick', title: 'Verified account', text: '✓' })),
+      tm && el('span', { class: 'team-chip', title: 'Team', text: (tm.leader === p.id ? '👑 ' : '') + tm.name }),
       el('span', { class: 'lv', text: 'Lv ' + p.level }), el('span', { text: status }),
       canKick && el('button', { class: 'kick', title: `Remove ${p.name} from the show`, text: '✕', onclick: () => { if (p.bot || confirm(`Remove ${p.name} from the show? They won't be able to rejoin.`)) send({ t: 'kick', id: p.id }); } })));
   }
@@ -902,8 +967,8 @@ function setting(obj) { send({ t: 'settings', ...obj }); }
 function renderHost() {
   const r = S.room; if (!r) return;
   const box = $('hostBox'), amHost = r.hostId === S.me.id, st = r.settings;
-  const bots = r.players.filter((p) => p.bot).length;
-  const key = JSON.stringify([amHost, r.phase, st, S.music.songs.length, r.players.length, bots, r.max, r.current, r.round, r.hostId, S.streamer]);
+  const bots = r.players.filter((p) => p.bot).length, nPlay = r.players.filter((p) => !p.spec).length;
+  const key = JSON.stringify([amHost, r.phase, st, S.music.songs.length, nPlay, bots, r.max, r.current, r.round, r.hostId, S.streamer]);
   if (key === hostKey) return;
   hostKey = key; box.textContent = '';
   const songLine = r.phase !== 'lobby' && r.phase !== 'ready' && r.phase !== 'gameover'
@@ -913,7 +978,8 @@ function renderHost() {
     box.append(el('h3', { text: 'Tonight\'s show' }),
       el('div', { class: 'now', text: `Host: ${nameOf(r, r.hostId)}${r.ownerId !== r.hostId ? ' (stand-in)' : ''}` }),
       el('div', { class: 'now', text: songLine }),
-      st.manual ? el('div', { class: 'now', text: 'The host starts each round' }) : '');
+      st.manual ? el('div', { class: 'now', text: 'The host starts each round' }) : '',
+      st.teams ? el('div', { class: 'now', text: '🚩 Team show' }) : '');
     return;
   }
   box.append(el('h3', { text: '👑 Host controls' + (r.ownerId !== S.me.id ? ' (standing in)' : '') }));
@@ -949,7 +1015,9 @@ function renderHost() {
   const scr = el('select', { 'aria-label': 'Time to grab a seat', onchange: (e) => setting({ scramble: +e.target.value }) },
     ...[10, 15, 20, 25, 30, 45, 60].map((s) => el('option', { value: s, text: `${s} seconds to grab a seat` })));
   scr.value = String(st.scramble);
-  box.append(scr, el('label', { class: 'check' }, el('input', { type: 'checkbox', checked: st.manual, onchange: (e) => setting({ manual: e.target.checked }) }), 'I\'ll start each round myself'));
+  box.append(scr, el('label', { class: 'check' }, el('input', { type: 'checkbox', checked: st.manual, onchange: (e) => setting({ manual: e.target.checked }) }), 'I\'ll start each round myself'),
+    el('label', { class: 'check', title: r.phase === 'lobby' ? 'Players form teams in the green room; each team shares one chair' : 'Can be changed in the green room' },
+      el('input', { type: 'checkbox', checked: st.teams, disabled: r.phase !== 'lobby', onchange: (e) => setting({ teams: e.target.checked }) }), '🚩 Team show'));
 
   // puzzle mix
   const on = S.groups.filter((g) => st.puzzles[g.id]).length;
@@ -963,11 +1031,11 @@ function renderHost() {
 
   if (r.phase === 'lobby') {
     box.append(el('div', { class: 'row' },
-      el('button', { class: 'btn small', text: '+ Bot', disabled: r.players.length >= r.max, onclick: () => send({ t: 'addBot' }) }),
-      el('button', { class: 'btn small', text: '+5', title: 'Add 5 bots', disabled: r.players.length >= r.max, onclick: () => { for (let i = 0; i < 5; i++) send({ t: 'addBot' }); } }),
+      el('button', { class: 'btn small', text: '+ Bot', disabled: nPlay >= r.max, onclick: () => send({ t: 'addBot' }) }),
+      el('button', { class: 'btn small', text: '+5', title: 'Add 5 bots', disabled: nPlay >= r.max, onclick: () => { for (let i = 0; i < 5; i++) send({ t: 'addBot' }); } }),
       el('button', { class: 'btn small ghost', text: '− Bot', disabled: !bots, onclick: () => send({ t: 'removeBot' }) })),
-      el('button', { class: 'btn gold wide', text: '▶ Start the show', disabled: r.players.length < 2, onclick: () => send({ t: 'start' }) }));
-    if (r.players.length < 2) box.append(el('p', { class: 'hint', text: 'You need at least 2 contestants. Invite someone or add a bot.' }));
+      el('button', { class: 'btn gold wide', text: '▶ Start the show', disabled: nPlay < 2, onclick: () => send({ t: 'start' }) }));
+    if (nPlay < 2) box.append(el('p', { class: 'hint', text: 'You need at least 2 contestants. Invite someone or add a bot.' }));
   }
 }
 let hostDetailsOpen = false;
@@ -979,6 +1047,8 @@ const mg = () => (S.mg[mgKey()] ||= {});
 function pickChair(i) {
   const r = S.room; if (!r || r.phase !== 'scramble' || !r.chairs[i] || r.chairs[i].owner) return;
   if (S.myPick === i) return;
+  const lead = myLeader(r);
+  if (lead && lead.id !== S.me.id) return toast(`Only your team leader (${lead.name}) can switch chairs.`, '', 2200);
   S.myPick = i; send({ t: 'pick', chair: i }); renderPuzzle();
 }
 function autoPick() {
@@ -1043,22 +1113,26 @@ function renderPuzzle() {
   if (key !== pzKey) {
     if (pz?.kind === 'reaction' && sub === 'go' && pzKey.endsWith('wait:' + (st.reset || 0))) Snd.sfx('go');
     pzKey = key; box.textContent = '';
-    if (me.seat != null) box.append(el('div', { class: 'pz-status', text: `🪑 SAFE! You grabbed chair ${me.seat + 1}.` }));
+    const lead = myLeader(r), teamMsg = r.teamShow && me.team ? teamById(r, me.team) : null;
+    if (me.seat != null) box.append(el('div', { class: 'pz-status', text: teamMsg ? `🪑 SAFE! ${teamMsg.name} has chair ${me.seat + 1}.` : `🪑 SAFE! You grabbed chair ${me.seat + 1}.` }));
     else {
       box.append(el('div', { class: 'chair-tabs', id: 'chairTabs' }));
+      if (teamMsg) box.append(el('div', { class: 'pz-team', text: lead.id === S.me.id ? `🚩 You lead ${teamMsg.name} — pick the chair, any teammate can solve it.` : `🚩 ${lead.name} picks ${teamMsg.name}'s chair — solve it first to seat the team!` }));
       if (pz) buildChallenge(box, pz, st);
     }
   }
   const tabs = $('chairTabs');
   if (tabs) { // update in place so a click isn't lost when a state update lands mid-press
     tabs.classList.toggle('many', r.chairs.length > 12);
+    const follower = myLeader(r)?.id !== S.me.id;
     if (tabs.children.length !== r.chairs.length) {
       tabs.textContent = '';
       r.chairs.forEach((_, i) => tabs.append(el('button', { type: 'button', onclick: () => pickChair(i) })));
     }
     r.chairs.forEach((c, i) => {
-      const rivals = r.players.filter((p) => p.pick === i && p.seat == null && p.alive && p.id !== S.me.id).length;
+      const rivals = new Set(r.players.filter((p) => p.pick === i && p.seat == null && p.alive && unitOf(r, p) !== unitOf(r, me)).map((p) => unitOf(r, p))).size;
       const b = tabs.children[i];
+      b.disabled = follower && i !== S.myPick;
       b.className = (i === S.myPick ? 'sel ' : '') + (c.owner ? 'taken' : '');
       b.textContent = '🪑 ' + (i + 1) + (rivals && !c.owner ? ' ' : '');
       if (S.cb && c.puzzle && c.puzzle.colour && !c.owner) b.append(el('span', { class: 'cb', title: 'Colour challenge', text: '🎨' }));
@@ -1797,10 +1871,11 @@ function drawDJ(t, r) {
   g.fillStyle = '#16121f'; g.fillRect(cx - 14 * k, top - 10 * k, 28 * k, 8 * k);
   for (let i = 0; i < 4; i++) { g.fillStyle = playing && (i + Math.floor(t * 6)) % 2 ? '#19e3c9' : '#5a5370'; g.fillRect(cx - 11 * k + i * 6.5 * k, top - 8 * k, 3 * k, 4 * k); }
 }
-function drawAudience(t, r) {
+function drawAudience(t, r, between) {
   const mood = r.phase === 'music' ? 1 : r.phase === 'results' || r.phase === 'gameover' ? 2 : r.phase === 'scramble' ? 3 : 0;
   const Z = 1.35; // crowd size
   for (let row = 0; row < 2; row++) {
+    if (row === 1 && between) between();
     const spacing = (row ? 34 : 30) * Z, y = H + (row ? 8 : -14);
     for (let i = 0, x = row ? 4 : -12; x < W + 20; x += spacing, i++) {
       const seed = i * 7.3 + row * 13;
@@ -2181,12 +2256,18 @@ function frame(now) {
   drawFog(t);
 
   // where everyone should be
-  const onStage = r.players.filter((p) => (r.phase === 'lobby' ? true : p.inGame && p.alive)); // out = audience until the next show
-  const audience = r.players.filter((p) => !onStage.includes(p));
+  const onStage = r.players.filter((p) => !p.spec && (r.phase === 'lobby' ? true : p.inGame && p.alive)); // out = gallery until the next show
+  const audience = r.players.filter((p) => !p.spec && !onStage.includes(p));
+  const specs = r.players.filter((p) => p.spec); // spectators stand in the crowd at the front
+  // teams huddle: one slot on the ring per team, members trail behind their leader in a little conga line
+  const unitIdx = new Map(), unitPos = new Map();
+  for (const p of onStage) { const k = unitOf(r, p); if (!unitIdx.has(k)) unitIdx.set(k, unitIdx.size); const n = unitPos.get(k) || []; n.push(p.id); unitPos.set(k, n); }
+  for (const [k, ids] of unitPos) { const t = teamById(r, k); if (t && ids.includes(t.leader)) { ids.splice(ids.indexOf(t.leader), 1); ids.unshift(t.leader); } }
+  const nUnits = unitIdx.size;
   const wantGallery = audience.length > 0;
   if (wantGallery !== galleryOn) { galleryOn = wantGallery; resize(); } // make room for the gallery on the right
   const nCh = r.chairs.length, items = [], cs = chairScale(nCh);
-  const crowd = clamp(1 - (onStage.length - 10) * 0.015, 0.7, 1); // shrink dancers in big shows
+  const crowd = clamp(1 - (onStage.length - 10) * 0.015, 0.7, 1) * (nUnits < onStage.length ? 0.9 : 1); // shrink dancers in big shows
   const seen = new Set();
   const place = (p, tx, ty, mode, sc) => {
     seen.add(p.id);
@@ -2200,15 +2281,24 @@ function frame(now) {
     }
     items.push({ y: e.y + (mode === 'sit' ? 19 * L.s : 0), p, e, dying });
   };
-  onStage.forEach((p, i) => {
-    if (r.phase === 'gameover' && p.id === r.winner) return place(p, cx, cy + 6 * s, 'ring', s * 1.25);
-    if (p.seat != null && nCh) { const c = chairPos(p.seat, nCh); return place(p, c.x, c.y - 18 * cs, 'sit', cs); }
+  onStage.forEach((p) => {
+    const k = unitOf(r, p), mates = unitPos.get(k), m = mates.indexOf(p.id), nm = mates.length, i = unitIdx.get(k);
+    const squeeze = (m - (nm - 1) / 2) * 17; // teammates squeezed side by side
+    if (r.phase === 'gameover' && r.byId.get(r.winner) && unitOf(r, r.byId.get(r.winner)) === k) return place(p, cx + squeeze * s * 1.2, cy + 6 * s - Math.abs(squeeze) * 0.3 * s, 'ring', s * (nm > 1 ? 1.05 : 1.25));
+    if (p.seat != null && nCh) { const c = chairPos(p.seat, nCh); return place(p, c.x + squeeze * cs, c.y - 18 * cs - (m ? 4 * cs : 0), m ? 'squeeze' : 'sit', cs * (m ? 0.9 : 1)); }
     if (r.phase === 'scramble' && p.pick != null && nCh && r.chairs[p.pick]) {
       const c = chairPos(p.pick, nCh), a = (nCh <= 1 ? 0 : c.a) + (sr(strHash(p.id), 1) - 0.5) * (nCh <= 1 ? TAU : 2.2);
-      return place(p, c.x + Math.cos(a) * 54 * cs, c.y + Math.sin(a) * 30 * cs, 'pick', cs);
+      return place(p, c.x + Math.cos(a) * 54 * cs + squeeze * 1.6 * cs, c.y + Math.sin(a) * 30 * cs + Math.abs(squeeze) * 0.25 * cs, 'pick', cs);
     }
-    const a = (i / onStage.length) * TAU + spin, y = cy + Math.sin(a) * RY;
-    place(p, cx + Math.cos(a) * RX, y, 'ring', s * crowd * (0.86 + 0.28 * ((y - (cy - RY)) / (2 * RY))));
+    const a = (i / nUnits) * TAU + spin - m * Math.min(0.07, (TAU / nUnits) * 0.1), y = cy + Math.sin(a) * RY;
+    const kk = s * crowd * (0.86 + 0.28 * ((y - (cy - RY)) / (2 * RY)));
+    place(p, cx + Math.cos(a) * RX + squeeze * 2.1 * kk, y + Math.abs(squeeze) * 0.35 * kk, 'ring', kk);
+  });
+  specs.forEach((p, i) => { // spread through the crowd, in front of the stage
+    // between the emote bar (bottom left) and the DJ booth (bottom right), spilling wider when it's busy
+    const n = specs.length, lo = n > 6 ? 0.06 : 0.44, hi = n > 6 ? 0.94 : innerWidth > 900 ? 0.7 : 0.94;
+    const gap = Math.min((hi - lo) / n, 0.12), x = W * ((lo + hi) / 2 + (i - (n - 1) / 2) * gap + (sr(7, i) - 0.5) * gap * 0.3);
+    place(p, clamp(x, 30, W - 30), H - 14 + (i % 2) * 6, 'spec', clamp(0.8 * s, 0.62, 0.95));
   });
   const gal = galleryLayout(audience.length);
   audience.forEach((p, i) => { const g2 = gal.spot(i); place(p, g2.x, g2.y, 'aud', gal.sc); });
@@ -2224,7 +2314,7 @@ function frame(now) {
   const audItems = [];
   for (const it of items) {
     if (it.chair != null) { drawChair(g, it.pos.x, it.pos.y, cs, it.chair, it.st, t); continue; }
-    if (it.e.mode === 'aud' && !it.dying) { audItems.push(it); continue; }
+    if ((it.e.mode === 'aud' || it.e.mode === 'spec') && !it.dying) { audItems.push(it); continue; }
     const { p, e } = it, isMe = p.id === S.me.id;
     if (it.dying) {
       const k = (now - e.deathAt) / DEATH_MS;
@@ -2234,8 +2324,16 @@ function frame(now) {
     }
     const moving = e.mode === 'ring' && (idle || r.phase === 'music');
     const hop = (e.claimAt && now - e.claimAt < 500 ? -Math.sin(((now - e.claimAt) / 500) * Math.PI) * 18 * s : 0) - (moving ? pulse * 7 * s : 0);
-    drawAvatar(g, e.x, e.y, e.sc, p, t, { moving, sit: e.mode === 'sit', dy: hop, alpha: p.away ? 0.45 : 1 });
+    drawAvatar(g, e.x, e.y, e.sc, p, t, { moving, sit: e.mode === 'sit' || e.mode === 'squeeze', dy: hop, alpha: p.away ? 0.45 : 1 });
     drawTag(g, e.x, e.y, e.sc, p, isMe);
+    const tm = teamsOn(r) && p.team && teamById(r, p.team);
+    if (tm && tm.leader === p.id && (unitPos.get(p.team) || []).length > 1) { // team pennant over the leader
+      const fs = clamp(13 * e.sc, 10, 15), ty = e.y + hop - 104 * e.sc;
+      g.font = `700 ${fs}px ${FONT_B}`; g.textAlign = 'center'; g.textBaseline = 'middle';
+      const w = g.measureText('🚩 ' + tm.name).width + 14;
+      g.fillStyle = 'rgba(25,227,201,.92)'; rrect(g, e.x - w / 2, ty - fs * 0.75, w, fs * 1.5, 7); g.fill();
+      g.fillStyle = '#0b2420'; g.fillText('🚩 ' + tm.name, e.x, ty + 0.5);
+    }
     if (e.missAt && now - e.missAt < 800) {
       const k = (now - e.missAt) / 800;
       g.globalAlpha = 1 - k; g.fillStyle = '#ff3b53'; g.font = `${30 * e.sc}px ${FONT_D}`; g.textAlign = 'center';
@@ -2243,17 +2341,24 @@ function frame(now) {
     }
   }
   stageOff();
+  const galItems = audItems.filter((it) => it.e.mode === 'aud'), specItems = audItems.filter((it) => it.e.mode === 'spec');
   if (gal.n) {
     drawGallery(gal, t);
-    audItems.sort((a, b) => a.e.y - b.e.y);
-    for (const { p, e } of audItems) {
+    galItems.sort((a, b) => a.e.y - b.e.y);
+    for (const { p, e } of galItems) {
       const jump = -waveLift(e.x) * 70 * e.sc;
       drawAvatar(g, e.x, e.y, e.sc, p, t, { alpha: p.away ? 0.45 : 1, noShadow: true, dy: jump });
       drawTag(g, e.x, e.y + jump, e.sc * 0.9, p, p.id === S.me.id);
     }
   }
   if (innerWidth > 900 && W >= 760) drawDJ(t, r); // desktop only
-  drawAudience(t, r);
+  drawAudience(t, r, () => { // spectators stand between the back and front rows of the crowd
+    for (const { p, e } of specItems) {
+      const jump = -waveLift(e.x) * 40 * e.sc - Math.abs(Math.sin(t * 3 + strHash(p.id))) * (r.phase === 'music' ? 4 : 1);
+      drawAvatar(g, e.x, e.y, e.sc, p, t, { alpha: p.away ? 0.45 : 1, noShadow: true, dy: jump });
+      drawTag(g, e.x, e.y - 98 * e.sc + jump, e.sc * 0.9, { ...p, name: '👀 ' + p.name }, p.id === S.me.id);
+    }
+  });
 
   // emote bubbles float above everything
   g.textAlign = 'center'; g.textBaseline = 'middle';
