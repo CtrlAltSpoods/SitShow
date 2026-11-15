@@ -53,6 +53,7 @@ const S = {
   me: null, catalog: null, groups: [], music: { songs: [], cats: [], streamSafe: [] }, rooms: [], room: null,
   myPick: null, lockUntil: 0, pw: {}, pendingCode: null, invite: null, mg: {},
   streamer: LS.get('sitshow.streamer') === '1',
+  cb: LS.get('sitshow.cb') === '1', // colourblind mode
 };
 let token = LS.get('sitshow.token');
 if (!/^[a-f0-9]{32}$/.test(token || '')) { token = newToken(); LS.set('sitshow.token', token); }
@@ -147,6 +148,12 @@ const on = {
   },
   emote(m) { const e = ents.get(m.id); if (e) { e.emotes.push({ e: m.e, at: performance.now() }); if (e.emotes.length > 4) e.emotes.shift(); } Snd.sfx('blip'); },
   miss(m) { const e = ents.get(m.id); if (e) e.missAt = performance.now(); },
+  rhythm(m) {
+    const r = S.room; if (!r || m.chair !== S.myPick) return;
+    const avg = Math.round(m.gaps.reduce((a, b) => a + b) / m.gaps.length), target = r.chairs[m.chair]?.puzzle?.period || 0;
+    S.rhythmMsg = { key: mgKey(), msg: m.ok ? 'Perfect timing!' : `Your beat: ${avg} ms (target ${target} ms) — ${avg > target ? 'too slow' : 'too fast'} or uneven. Listen again…` };
+    const d = $('rhythmMsg'); if (d) d.textContent = S.rhythmMsg.msg;
+  },
   sw(m) { // stopwatch verdict from the server
     const r = S.room; if (!r || m.chair !== S.myPick) return;
     const target = r.chairs[m.chair]?.puzzle?.target || 0, off = (m.dt - target) / 1000;
@@ -188,6 +195,7 @@ const on = {
     S.me = m.me; renderMe();
     const box = el('div');
     box.append(el('b', { text: `+${m.gained} XP` }));
+    if (m.called) box.append(document.createTextNode(' — 🔮 you called the winner!'));
     if (m.leveled) {
       box.append(document.createTextNode(` — LEVEL UP! You are now level ${m.me.level}.`));
       if (m.unlocked.length) box.append(el('div', { text: 'Unlocked: ' + m.unlocked.map((u) => u.name).join(', ') }));
@@ -415,6 +423,17 @@ function renderAccount() {
   $('invSignin').hidden = me.account || !!blocked;
 }
 $('invSignin').addEventListener('click', signIn);
+
+// colourblind mode: auto-pick skips colour-matching chairs, and they're marked 🎨
+for (const c of $$('[data-cb]')) {
+  c.checked = S.cb;
+  c.addEventListener('change', (e) => {
+    S.cb = e.target.checked; LS.set('sitshow.cb', S.cb ? '1' : '0');
+    for (const o of $$('[data-cb]')) o.checked = S.cb;
+    if (S.cb) toast('🎨 Colourblind mode on — you\'ll start on chairs that don\'t depend on telling colours apart.', 'good', 5000);
+    if (S.room) renderPuzzle();
+  });
+}
 
 // ───────────────────────────── avatar upload (resized + cached locally) ─────────────────────────────
 const AVATAR_SIZE = 256;
@@ -763,6 +782,13 @@ function onPhase(r, prev) {
       confetti.length = 0; preRoundBed(r);
       banner('', r.players.length < 2 ? 'Waiting for contestants — share the invite link!' : 'Waiting for the host to start the show…');
       break;
+    case 'vote': {
+      preRoundBed(r); Snd.sfx('drum');
+      const me = r.byId.get(S.me.id), finalist = me && me.inGame && me.alive;
+      if (finalist) banner('THE GALLERY IS VOTING', 'The audience is predicting who will win the final…', 'teal');
+      else banner('WHO WILL WIN?', `Predict the champion — +${30} XP if you call it`, 'teal');
+      break;
+    }
     case 'ready':
       preRoundBed(r);
       banner(`UP NEXT: ROUND ${r.round + 1}`, r.hostId === S.me.id ? 'Start the round when everyone\'s ready' : 'Waiting for the host to start the round…', 'teal');
@@ -814,7 +840,41 @@ function onRoomUpdate(r) {
   if (amHost && r.phase === 'ready') { sb.hidden = false; sb.textContent = `▶ Start round ${r.round + 1}`; sb.onclick = () => send({ t: 'nextRound' }); }
   else if (amHost && r.phase === 'lobby' && r.players.length >= 2) { sb.hidden = false; sb.textContent = '▶ Start the show'; sb.onclick = () => send({ t: 'start' }); }
   else sb.hidden = true;
-  renderPlayers(r); renderHost(); renderPuzzle(); renderChatState(r);
+  renderPlayers(r); renderHost(); renderPuzzle(); renderChatState(r); renderVote(r);
+}
+// ── final-round prediction: voters pick, finalists see a sign, everyone sees the tally ──
+function renderVote(r) {
+  const panel = $('votePanel');
+  if (r.phase !== 'vote' || !r.vote) {
+    if (r.phase === 'gameover' && r.voteResult) {
+      if (panel.dataset.k !== 'result') {
+        panel.dataset.k = 'result'; panel.textContent = ''; panel.hidden = false;
+        const v = r.voteResult, names = v.correct.map((c) => c.name);
+        panel.className = 'vote-result';
+        panel.append(el('b', { text: '🔮 The gallery\'s predictions' }),
+          el('div', { text: names.length ? `Called it: ${names.join(', ')} (+${v.bonus} XP)` : v.voters ? 'Nobody saw that coming! 😱' : '' }));
+      }
+      return;
+    }
+    panel.hidden = true; panel.dataset.k = ''; panel.className = 'vote-panel'; return;
+  }
+  panel.className = 'vote-panel'; panel.hidden = false;
+  const me = r.byId.get(S.me.id), finalist = me && me.inGame && me.alive, v = r.vote, mine = S.myVote && S.myVote.round === r.round ? S.myVote.id : null;
+  const key = JSON.stringify([finalist, v.counts, v.total, mine]);
+  if (panel.dataset.k === key) return;
+  panel.dataset.k = key; panel.textContent = '';
+  panel.append(el('h3', { text: finalist ? '🔮 The gallery is voting!' : '🔮 Who will win the final?' }),
+    el('p', { text: finalist ? 'The audience is predicting which of you will win. Get ready — the final starts right after.' : (mine ? 'Locked in! Watch the votes roll in…' : `Pick your champion. Call it right for +30 XP.`) }));
+  const cands = el('div', { class: 'vote-cands' });
+  for (const id of v.candidates) {
+    const p = r.byId.get(id); if (!p) continue;
+    const pct = v.total ? Math.round((v.counts[id] / v.total) * 100) : 0;
+    const av = el('span', { class: 'avatar' }); setAvatarEl(av, p, p.id === S.me.id ? LS.get('sitshow.avatar') : null);
+    cands.append(el('button', { type: 'button', class: 'vote-cand' + (mine === id ? ' mine' : ''), disabled: finalist,
+      onclick: () => { S.myVote = { round: r.round, id }; send({ t: 'vote', id }); renderVote(S.room); } },
+      av, el('span', { text: p.name }), el('span', { class: 'pct', text: `${v.counts[id]} vote${v.counts[id] === 1 ? '' : 's'} · ${pct}%` }), el('i', { class: 'bar', style: `width:${pct}%` })));
+  }
+  panel.append(cands, el('p', { style: 'margin:10px 0 0;font-size:.8rem', text: `${v.total} of ${v.voters} in the gallery have voted` }));
 }
 
 function renderPlayers(r) {
@@ -924,8 +984,9 @@ function pickChair(i) {
 function autoPick() {
   const r = S.room; const e = ents.get(S.me.id);
   let best = null, bd = Infinity;
+  const avoidColour = S.cb && r.chairs.some((c) => !c.owner && c.puzzle && !c.puzzle.colour);
   r.chairs.forEach((c, i) => {
-    if (c.owner) return;
+    if (c.owner || (avoidColour && c.puzzle && c.puzzle.colour)) return;
     const pos = chairPos(i, r.chairs.length); const d = e ? Math.hypot(pos.x - e.x, pos.y - e.y) : i;
     if (d < bd) { bd = d; best = i; }
   });
@@ -946,6 +1007,12 @@ function mashTap() {
   const f = $('pzMeter'), c = $('pzCount');
   if (f && pz) f.style.width = Math.min(100, (st.n / pz.need) * 100) + '%';
   if (c && pz) c.textContent = `${Math.min(st.n, pz.need)} / ${pz.need}`;
+}
+function rhythmTap() {
+  const st = mg(); if (locked() || st.phase !== 'tap' || (st.n || 0) >= 5) return;
+  st.n = (st.n || 0) + 1; tap(); Snd.sfx('tick');
+  const m = $('puzzle').querySelector('.pz-metro'); if (m) { m.classList.add('tick'); setTimeout(() => m.classList.remove('tick'), 90); }
+  $$('#puzzle .pz-taps i').forEach((d, k) => d.classList.toggle('on', k < st.n));
 }
 function swTap() { // stopwatch game: first press starts, second stops; the readout hides after a second
   if (locked() || S.myPick == null) return;
@@ -971,7 +1038,7 @@ function renderPuzzle() {
   const pz = r.chairs[S.myPick]?.puzzle, st = mg();
   let sub = '';
   if (pz?.kind === 'reaction') sub = pz.go ? 'go' : 'wait';
-  if (pz?.kind === 'memory' || pz?.kind === 'simon') sub = st.phase || 'show';
+  if (pz && ['memory', 'simon', 'flash', 'rhythm'].includes(pz.kind)) sub = st.phase || 'show';
   const key = me.seat != null ? 'safe' : `${r.round}:${S.myPick}:${sub}:${st.reset || 0}`;
   if (key !== pzKey) {
     if (pz?.kind === 'reaction' && sub === 'go' && pzKey.endsWith('wait:' + (st.reset || 0))) Snd.sfx('go');
@@ -994,6 +1061,7 @@ function renderPuzzle() {
       const b = tabs.children[i];
       b.className = (i === S.myPick ? 'sel ' : '') + (c.owner ? 'taken' : '');
       b.textContent = '🪑 ' + (i + 1) + (rivals && !c.owner ? ' ' : '');
+      if (S.cb && c.puzzle && c.puzzle.colour && !c.owner) b.append(el('span', { class: 'cb', title: 'Colour challenge', text: '🎨' }));
       if (rivals && !c.owner) b.append(el('span', { class: 'rivals', text: '×' + rivals }));
     });
   }
@@ -1062,6 +1130,37 @@ function buildChallenge(box, pz, st) {
       if (phase === 'show' && !st.timer) {
         pz.seq.forEach((k, i) => setTimeout(() => flash(k), 500 + i * 560));
         st.timer = setTimeout(() => { st.phase = 'input'; st.picked = []; renderPuzzle(); }, 700 + pz.seq.length * 560);
+      }
+      break;
+    }
+    case 'textgrid': {
+      const tiles = el('div', { class: 'pz-tiles letters', style: `grid-template-columns:repeat(${pz.cols},1fr)` });
+      pz.cells.forEach((ch, i) => tiles.append(el('button', { type: 'button', text: ch, onclick: () => submitAnswer(String(i)) })));
+      box.append(tiles);
+      break;
+    }
+    case 'flash': {
+      const phase = st.phase || 'show', grid = el('div', { class: 'pz-flash' + (phase === 'show' ? '' : ' hidden') });
+      for (let k = 0; k < 25; k++) grid.append(el('i', { class: pz.cells.includes(k) ? 'on' : '' }));
+      box.append(grid);
+      if (phase === 'show') { box.append(el('p', { class: 'hint', text: 'Count them — quick!' })); if (!st.timer) st.timer = setTimeout(() => { st.phase = 'answer'; renderPuzzle(); }, 1300); }
+      else choiceGrid();
+      break;
+    }
+    case 'rhythm': {
+      const phase = st.phase || 'show', metro = el('div', { class: 'pz-metro' }), dots = el('div', { class: 'pz-taps' }, ...Array.from({ length: 5 }, () => el('i')));
+      const beat = () => { metro.classList.add('tick'); Snd.sfx('tick'); setTimeout(() => metro.classList.remove('tick'), 90); };
+      box.append(metro);
+      if (phase === 'show') {
+        box.append(el('p', { class: 'hint', text: 'Listen to the beat…' }));
+        if (!st.timer) {
+          for (let k = 0; k < 4; k++) setTimeout(beat, 300 + k * pz.period);
+          st.timer = setTimeout(() => { st.phase = 'tap'; st.n = 0; renderPuzzle(); }, 300 + 4 * pz.period);
+        }
+      } else {
+        const pad = el('button', { type: 'button', class: 'pz-pad go', text: 'TAP!', onpointerdown: (e) => { e.preventDefault(); rhythmTap(); } });
+        [...dots.children].forEach((d, k) => d.classList.toggle('on', k < (st.n || 0)));
+        box.append(dots, pad, el('p', { class: 'hint', id: 'rhythmMsg', text: S.rhythmMsg && S.rhythmMsg.key === mgKey() ? S.rhythmMsg.msg : 'Tap 5 times at the same speed. Space bar works too.' }));
       }
       break;
     }
@@ -1137,11 +1236,11 @@ document.addEventListener('keydown', (e) => {
     for (let k = 1; k <= n; k++) { const i = ((S.myPick ?? -1) + (e.shiftKey ? -k : k) + n * 2) % n; if (!r.chairs[i].owner) { pickChair(i); break; } }
   } else if (e.target.tagName === 'INPUT') {
     // typing an answer (or chatting)
-  } else if (e.key === ' ' && pz && (pz.kind === 'reaction' || pz.kind === 'mash' || pz.kind === 'stopwatch')) {
+  } else if (e.key === ' ' && pz && ['reaction', 'mash', 'stopwatch', 'rhythm'].includes(pz.kind)) {
     e.preventDefault();
     if (e.repeat) return;
-    if (pz.kind === 'reaction') tap(); else if (pz.kind === 'stopwatch') swTap(); else mashTap();
-  } else if (/^[1-4]$/.test(e.key) && pz && pz.kind === 'choice' && pz.choices[+e.key - 1] != null) {
+    if (pz.kind === 'reaction') tap(); else if (pz.kind === 'stopwatch') swTap(); else if (pz.kind === 'rhythm') rhythmTap(); else mashTap();
+  } else if (/^[1-4]$/.test(e.key) && pz && pz.choices && pz.choices[+e.key - 1] != null && document.querySelector('#puzzle .pz-choices')) {
     submitAnswer(pz.choices[+e.key - 1]);
   }
 });
@@ -1389,7 +1488,7 @@ function analyseTempo(now, bin) {
   if (BT.next && BT.period && Math.abs(BT.next - next) < period * 0.3) next = BT.next * 0.6 + next * 0.4; // smooth corrections
   BT.period = period; BT.conf = ac[bestL] / r0; BT.next = next;
 }
-if (/[?&]debug=1/.test(location.search)) window.__sitshow = { BT, BEAT, showChallenge(pz) { const box = $('puzzle'); box.hidden = false; box.textContent = ''; buildChallenge(box, pz, {}); } };
+if (/[?&]debug=1/.test(location.search)) window.__sitshow = { BT, BEAT, showChallenge(pz, st = {}) { const box = $('puzzle'); box.hidden = false; box.textContent = ''; buildChallenge(box, pz, st); }, S, drawAvatar };
 const confetti = [];
 const imgCache = new Map();
 const DEATH_MS = 2500;
@@ -1763,10 +1862,85 @@ function dancePose(id, t) {
     case 'moonwalk': { const p = (t * 1.6) % 1, q = (t * 1.6 + 0.5) % 1; return { rot: -0.12, bx: s(t * 10) * 1.5, hl: { x: 4, y: 4 }, hr: { x: -12, y: -34 }, fl: { x: (p - 0.5) * 18, y: p > 0.8 ? -4 : 0 }, fr: { x: (q - 0.5) * 18, y: q > 0.8 ? -4 : 0 } }; }
     case 'robot': { const q = Math.floor(t * 4) % 4; return { rot: [0.1, 0, -0.1, 0][q], dy: q % 2 ? -3 : 0, hl: { x: -4, y: [-22, 0, 6, 0][q] }, hr: { x: 4, y: [6, 0, -22, 0][q] }, fl: { x: 0, y: q === 1 ? -5 : 0 }, fr: { x: 0, y: q === 3 ? -5 : 0 } }; }
     case 'floss': { const w = s(t * 13); return { bx: -w * 6, hl: { x: w * 20 + 14, y: 8 }, hr: { x: w * 20 - 14, y: 8 }, fl: Z, fr: Z, rot: -w * 0.05 }; }
+    case 'disco': { const q = s(t * 5) > 0; return { rot: q ? -0.12 : 0.08, dy: -a(s(t * 10)) * 3, bx: q ? -3 : 3, hl: q ? { x: -2, y: 10 } : { x: 6, y: 6 }, hr: q ? { x: 10, y: -38 } : { x: -6, y: 10 }, fl: { x: q ? -3 : 0, y: 0 }, fr: { x: q ? 0 : 4, y: q ? 0 : -3 } }; }
+    case 'chicken': { const f = a(s(t * 14)), q = Math.floor(t * 2) % 2; return { dy: -f * 4, rot: (q ? 1 : -1) * 0.06, hl: { x: -8 - f * 10, y: 4 - f * 8 }, hr: { x: 8 + f * 10, y: 4 - f * 8 }, fl: { x: -f * 5, y: q ? -f * 4 : 0 }, fr: { x: f * 5, y: q ? 0 : -f * 4 } }; }
+    case 'sprinkler': { const st = Math.floor(t * 6) % 6, w = (st - 2.5) / 2.5; return { rot: w * 0.18, dy: st % 2 ? -2 : 0, hl: { x: 6, y: -24 }, hr: { x: 14 - (st % 2) * 4, y: 2 }, fl: { x: -2, y: 0 }, fr: { x: 4, y: -2 } }; }
+    case 'shuffle': { const w = s(t * 12), q = c(t * 6); return { bx: q * 8, dy: -a(w) * 3, hl: { x: w * 6, y: -2 }, hr: { x: -w * 6, y: -2 }, fl: { x: w * 12, y: Math.min(0, w) * 5 }, fr: { x: -w * 12, y: Math.min(0, -w) * 5 } }; }
+    case 'dab': { const ph = (t * 1.2) % 1, on = ph < 0.45; return { rot: on ? 0.2 : 0, dy: on ? 0 : -a(s(t * 9)) * 4, hl: on ? { x: -14, y: -26 } : { x: 0, y: s(t * 9) * 6 }, hr: on ? { x: -24, y: -14 } : { x: 0, y: -s(t * 9) * 6 }, fl: Z, fr: Z }; }
+    case 'flip': { const ph = (t * 0.7) % 1, air = ph < 0.4 ? ph / 0.4 : 0; return { rot: -air * TAU, dy: -s(air * Math.PI) * 46 - (air ? 0 : a(s(t * 8)) * 3), hl: { x: -6, y: air ? -20 : 0 }, hr: { x: 6, y: air ? -20 : 0 }, fl: { x: 0, y: air ? -8 : 0 }, fr: { x: 0, y: air ? -8 : 0 } }; }
+    case 'levitate': { const h = 16 + s(t * 2.4) * 6; return { dy: -h, rot: s(t * 1.2) * 0.08, hl: { x: -10, y: -6 + s(t * 3) * 4 }, hr: { x: 10, y: -6 - s(t * 3) * 4 }, fl: { x: 4, y: -6 }, fr: { x: -4, y: -6 }, glow: 1 }; }
     case 'idle': return { dy: s(t * 2.2) * 1.5, hl: Z, hr: Z, fl: Z, fr: Z };
     default: { const w = s(t * 9); return { dy: -a(w) * 4, rot: w * 0.04, hl: { x: 0, y: w * 9 }, hr: { x: 0, y: -w * 9 }, fl: { x: 0, y: Math.min(0, w) * 6 }, fr: { x: 0, y: Math.min(0, -w) * 6 } }; }
   }
 }
+// Animated frames. Higher levels get more going on: 'back' draws behind the body, 'front' over the head.
+function frameFx(c, ring, t, hy, hr, layer) {
+  const TA = TAU, star = (x, y, r, col) => { c.fillStyle = col; c.beginPath(); for (let i = 0; i < 8; i++) { const a = i * Math.PI / 4, rr = i % 2 ? r * 0.35 : r; c.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr); } c.fill(); };
+  c.save();
+  if (ring === 'sparkle' && layer === 'front') {
+    for (let i = 0; i < 5; i++) { const a = t * 1.3 + i * TA / 5, tw = (Math.sin(t * 6 + i * 2) + 1) / 2; c.globalAlpha = 0.4 + tw * 0.6; star(Math.cos(a) * (hr + 9), hy + Math.sin(a) * (hr + 9), 2 + tw * 4, '#fff6c2'); }
+  } else if (ring === 'fire') {
+    if (layer === 'back') { // flickering tongues of flame licking up behind the head
+      c.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < 14; i++) {
+        const a = Math.PI + (i / 13) * Math.PI, ph = (t * 2.2 + i * 0.37) % 1, len = 16 + 24 * Math.sin(ph * Math.PI) + 6 * Math.sin(t * 13 + i);
+        const bx = Math.cos(a) * hr, by = hy + Math.sin(a) * hr * 0.9 + hr * 0.3;
+        const g = c.createLinearGradient(bx, by, bx, by - len); g.addColorStop(0, 'rgba(255,90,20,.9)'); g.addColorStop(0.6, 'rgba(255,200,40,.6)'); g.addColorStop(1, 'rgba(255,240,150,0)');
+        c.fillStyle = g; c.beginPath(); c.moveTo(bx - 6, by); c.quadraticCurveTo(bx + Math.sin(t * 9 + i) * 6, by - len * 0.6, bx + Math.sin(t * 7 + i) * 3, by - len); c.quadraticCurveTo(bx + 4, by - len * 0.4, bx + 6, by); c.fill();
+      }
+    } else for (let i = 0; i < 4; i++) { const ph = (t * 0.9 + i / 4) % 1; c.globalAlpha = 1 - ph; c.fillStyle = '#ffb02e'; c.beginPath(); c.arc(Math.sin(i * 3 + t) * hr * 0.8, hy - hr - ph * 30, 2.2, 0, TA); c.fill(); }
+  } else if (ring === 'electric' && layer === 'front') { // crackling arcs that jump round the frame
+    c.strokeStyle = '#bfefff'; c.shadowColor = '#4dc3ff'; c.shadowBlur = 12; c.lineWidth = 2;
+    const seed = Math.floor(t * 14);
+    for (let b = 0; b < 3; b++) {
+      const a0 = ((seed * 7 + b * 13) % 36) / 36 * TA; c.beginPath();
+      for (let j = 0; j <= 6; j++) { const a = a0 + j * 0.18, jit = ((seed * 31 + b * 17 + j * 7) % 11) - 5; c.lineTo(Math.cos(a) * (hr + 4 + jit), hy + Math.sin(a) * (hr + 4 + jit)); }
+      c.stroke();
+    }
+    if (seed % 5 === 0) { c.globalAlpha = 0.25; c.fillStyle = '#bfefff'; c.beginPath(); c.arc(0, hy, hr + 12, 0, TA); c.fill(); }
+  } else if (ring === 'galaxy') {
+    if (layer === 'back') { // a slowly turning nebula disc with stars
+      c.translate(0, hy); c.rotate(t * 0.4); c.scale(1, 0.55);
+      const g = c.createRadialGradient(0, 0, hr * 0.6, 0, 0, hr * 2.8); g.addColorStop(0, 'rgba(180,107,255,.9)'); g.addColorStop(0.5, 'rgba(77,141,255,.5)'); g.addColorStop(1, 'rgba(20,0,60,0)');
+      c.fillStyle = g; c.beginPath(); c.arc(0, 0, hr * 2.8, 0, TA); c.fill();
+      for (let i = 0; i < 18; i++) { const a = i * 2.4, r = hr * (1.05 + (i % 6) * 0.17); c.globalAlpha = 0.5 + 0.5 * Math.sin(t * 4 + i); c.fillStyle = '#fff'; c.fillRect(Math.cos(a) * r, Math.sin(a) * r, 2, 2); }
+    } else { // orbiting planets pass in front
+      const pl = [['#ffb02e', 1.5, 5, 0], ['#19e3c9', 1.0, 3.5, 2], ['#ff3d81', 2.2, 2.5, 4]];
+      for (const [col, sp, r, off] of pl) { const a = t * sp + off, x = Math.cos(a) * (hr + 12), y = hy + Math.sin(a) * (hr + 12) * 0.4; if (Math.sin(a) < 0) continue; c.fillStyle = col; c.shadowColor = col; c.shadowBlur = 8; c.beginPath(); c.arc(x, y, r, 0, TA); c.fill(); }
+    }
+  } else if (ring === 'phoenix') {
+    if (layer === 'back') { // flapping flame wings
+      const flap = Math.sin(t * 5) * 0.35;
+      c.globalCompositeOperation = 'lighter';
+      for (const side of [-1, 1]) {
+        c.save(); c.translate(side * 10, -40); c.rotate(side * (0.5 + flap)); c.scale(side, 1);
+        for (let f = 0; f < 5; f++) {
+          const L = 40 + f * 8, g = c.createLinearGradient(0, 0, L, -L * 0.3); g.addColorStop(0, 'rgba(255,220,80,.95)'); g.addColorStop(0.5, 'rgba(255,90,30,.7)'); g.addColorStop(1, 'rgba(200,20,60,0)');
+          c.fillStyle = g; c.beginPath(); c.moveTo(0, 0); c.quadraticCurveTo(L * 0.5, -22 - f * 7 + Math.sin(t * 8 + f) * 3, L, -f * 9 - 4); c.quadraticCurveTo(L * 0.5, -f * 4, 0, 8); c.fill();
+        }
+        c.restore();
+      }
+    } else for (let i = 0; i < 6; i++) { const ph = (t * 0.8 + i / 6) % 1; c.globalAlpha = (1 - ph) * 0.9; star(Math.sin(i * 5 + t * 2) * 30, -20 - ph * 70, 3 * (1 - ph) + 1, i % 2 ? '#ffd23d' : '#ff6a2e'); }
+  } else if (ring === 'legend') {
+    if (layer === 'back') { // rotating god-rays + pulsing aura + rising sparks
+      c.translate(0, hy); c.globalCompositeOperation = 'lighter';
+      c.save(); c.rotate(t * 0.6);
+      for (let i = 0; i < 12; i++) { c.rotate(TA / 12); const g = c.createLinearGradient(0, 0, 0, -hr * 3); g.addColorStop(0, `hsla(${(t * 80 + i * 30) % 360},100%,70%,.55)`); g.addColorStop(1, 'rgba(255,255,255,0)'); c.fillStyle = g; c.beginPath(); c.moveTo(-5, 0); c.lineTo(0, -hr * 3 - 8 * Math.sin(t * 3 + i)); c.lineTo(5, 0); c.fill(); }
+      c.restore();
+      const pr = hr + 10 + 4 * Math.sin(t * 4), g = c.createRadialGradient(0, 0, hr, 0, 0, pr + 10); g.addColorStop(0, 'rgba(255,240,180,.7)'); g.addColorStop(1, 'rgba(255,61,129,0)'); c.fillStyle = g; c.beginPath(); c.arc(0, 0, pr + 10, 0, TA); c.fill();
+    } else {
+      // two counter-rotating dashed rings, a halo, orbiting stars
+      c.lineWidth = 2.5; c.setLineDash([6, 5]);
+      c.strokeStyle = '#ffe17a'; c.lineDashOffset = -t * 30; c.beginPath(); c.arc(0, hy, hr + 9, 0, TA); c.stroke();
+      c.strokeStyle = '#ff7ad1'; c.lineDashOffset = t * 40; c.beginPath(); c.arc(0, hy, hr + 14, 0, TA); c.stroke();
+      c.setLineDash([]);
+      c.strokeStyle = '#fff6c2'; c.shadowColor = '#ffd23d'; c.shadowBlur = 14; c.lineWidth = 3; c.beginPath(); c.ellipse(0, hy - hr - 10 + Math.sin(t * 3) * 2, 15, 4.5, 0, 0, TA); c.stroke();
+      for (let i = 0; i < 3; i++) { const a = -t * 2 + i * TA / 3; star(Math.cos(a) * (hr + 14), hy + Math.sin(a) * (hr + 14), 4.5, `hsl(${(t * 120 + i * 120) % 360} 100% 75%)`); }
+    }
+  }
+  c.restore();
+}
+const RING_STROKE = { sparkle: '#fff6c2', fire: '#ff7a1a', electric: '#8fe3ff', galaxy: '#b46bff', phoenix: '#ffb02e', legend: '#ffe17a' };
 function drawAvatar(c, x, y, k, p, t, o = {}) {
   const d = dancePose(o.moving ? p.dance : 'idle', t + (strHash(p.id) % 100) / 10);
   const scale = k * (o.scale ?? 1);
@@ -1779,6 +1953,9 @@ function drawAvatar(c, x, y, k, p, t, o = {}) {
   c.translate(d.bx || 0, d.dy || 0);
   c.translate(0, -40); c.rotate((o.rot || 0) + (d.rot || 0)); c.scale(d.sx ?? 1, 1); c.translate(0, 40);
   const bodyCol = dark ? '#111' : `hsl(${hue} 72% 52%)`, bodyDark = dark ? '#000' : `hsl(${hue} 72% 34%)`;
+  const ring0 = p.ring || 'none', fx = !dark && RING_STROKE[ring0];
+  if (fx) frameFx(c, ring0, t, -64, 22, 'back');
+  if (d.glow && !dark) { c.save(); c.fillStyle = `hsla(${hue},90%,70%,.25)`; ellipse(c, 0, 2 - (d.dy || 0), 26, 6); c.fill(); c.restore(); }
   if (!o.sit) {
     c.fillStyle = dark ? '#000' : '#1b0b33';
     ellipse(c, -9 + d.fl.x, -3 + d.fl.y, 8, 5); c.fill(); ellipse(c, 9 + d.fr.x, -3 + d.fr.y, 8, 5); c.fill();
@@ -1792,6 +1969,7 @@ function drawAvatar(c, x, y, k, p, t, o = {}) {
     c.save();
     if (ring === 'gold') { c.shadowColor = '#ffc83d'; c.shadowBlur = 12; c.strokeStyle = '#ffc83d'; }
     else if (ring === 'neon') { c.shadowColor = '#19e3c9'; c.shadowBlur = 10 + 8 * Math.sin(t * 6); c.strokeStyle = '#19e3c9'; }
+    else if (RING_STROKE[ring]) { c.strokeStyle = RING_STROKE[ring]; c.shadowColor = RING_STROKE[ring]; c.shadowBlur = 8 + 6 * Math.sin(t * 5); }
     else if (ring === 'rainbow' && c.createConicGradient) { const cg = c.createConicGradient(t * 2, 0, hy); ['#ff3d81', '#ffc83d', '#3ddc84', '#19e3c9', '#4d8dff', '#b46bff', '#ff3d81'].forEach((col, i) => cg.addColorStop(i / 6, col)); c.strokeStyle = cg; }
     else c.strokeStyle = '#ffc83d';
     c.lineWidth = 6; c.beginPath(); c.arc(0, hy, hr + 2, 0, TAU); c.stroke(); c.restore();
@@ -1807,6 +1985,7 @@ function drawAvatar(c, x, y, k, p, t, o = {}) {
   }
   c.restore();
   if (ring === 'none' || dark) { c.strokeStyle = dark ? '#333' : '#fff'; c.lineWidth = 3; c.beginPath(); c.arc(0, hy, hr, 0, TAU); c.stroke(); }
+  if (fx) frameFx(c, ring, t, hy, hr, 'front');
   if (ring === 'crown' && !dark) { c.font = '26px ' + FONT_B; c.textAlign = 'center'; c.textBaseline = 'alphabetic'; c.fillText('👑', 0, hy - hr + 4); }
   c.restore();
 }
@@ -1946,13 +2125,13 @@ function frame(now) {
   if (!r || $('room').hidden || !bgBack) return;
 
   const tm = $('timer');
-  if (r.phase === 'scramble') {
+  if (r.phase === 'scramble' || r.phase === 'vote') {
     const left = Math.max(0, Math.ceil((r.remain - (now - r.at)) / 1000));
     tm.hidden = false; tm.textContent = left; tm.classList.toggle('low', left <= 5);
     Snd.setUrgency(left <= 5);
   } else tm.hidden = true;
 
-  const idle = r.phase === 'lobby' || r.phase === 'gameover' || r.phase === 'ready';
+  const idle = r.phase === 'lobby' || r.phase === 'gameover' || r.phase === 'ready' || r.phase === 'vote';
   // beats: only while everyone circles the chairs. Onset detection on the low end — a beat is a sudden
   // rise in bass energy compared with how much it has been rising recently, so it adapts to quiet,
   // loud or heavily compressed tracks alike.

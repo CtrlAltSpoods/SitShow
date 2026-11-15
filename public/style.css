@@ -338,6 +338,32 @@ select option { color: #111; }
 .puzzle.locked .pz-lock i { animation: drain 2s linear forwards; }
 @keyframes drain { to { width: 0; } }
 .pz-status { text-align: center; font-family: var(--display); font-size: 1.25rem; padding: 6px; }
+.pz-tiles.letters button { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 1.35rem; font-weight: 700; color: var(--ink); background: #fff; border: 2px solid var(--ink); box-shadow: 0 2px 0 rgba(0,0,0,.25); aspect-ratio: 1.25; padding: 0; }
+.pz-flash { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; width: min(220px, 70%); margin: 8px auto; }
+.pz-flash i { aspect-ratio: 1; border-radius: 50%; background: rgba(0,0,0,.07); }
+.pz-flash i.on { background: var(--pink); box-shadow: 0 0 10px var(--pink); }
+.pz-flash.hidden i.on { background: rgba(0,0,0,.07); box-shadow: none; }
+.pz-metro { width: 70px; height: 70px; margin: 8px auto; border-radius: 50%; background: rgba(0,0,0,.1); border: 4px solid var(--ink); transition: transform .06s, background .06s; }
+.pz-metro.tick { background: var(--teal); transform: scale(1.15); }
+.pz-taps { display: flex; justify-content: center; gap: 8px; margin: 6px 0; }
+.pz-taps i { width: 16px; height: 16px; border-radius: 50%; background: rgba(0,0,0,.12); }
+.pz-taps i.on { background: var(--pink); }
+.chair-tabs .cb { font-size: .75rem; margin-left: 2px; }
+/* final-round prediction vote */
+.vote-panel { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 5; width: min(520px, calc(100% - 24px));
+  background: linear-gradient(180deg, #2d1250, #160827); border: 4px solid var(--gold); border-radius: 18px; padding: 14px; box-shadow: 0 0 0 4px var(--ink), 0 14px 40px rgba(0,0,0,.6); text-align: center; }
+.vote-panel h3 { color: var(--gold); font-size: 1.15rem; margin-bottom: 4px; }
+.vote-panel p { margin: 0 0 10px; opacity: .85; font-size: .9rem; }
+.vote-cands { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.vote-cand { position: relative; overflow: hidden; border: 3px solid rgba(255,255,255,.2); background: rgba(0,0,0,.35); border-radius: 14px; padding: 10px; color: var(--cream); cursor: pointer; display: grid; justify-items: center; gap: 6px; font-family: var(--display); }
+.vote-cand:disabled { cursor: default; }
+.vote-cand .avatar { width: 54px; height: 54px; font-size: 24px; }
+.vote-cand.mine { border-color: var(--teal); box-shadow: 0 0 18px rgba(25,227,201,.5); }
+.vote-cand .bar { position: absolute; left: 0; bottom: 0; height: 5px; background: linear-gradient(90deg, var(--pink), var(--gold)); transition: width .3s; }
+.vote-cand .pct { font-family: var(--body); font-size: .78rem; opacity: .8; }
+.vote-result { position: absolute; left: 50%; top: 30%; transform: translateX(-50%); z-index: 5; width: min(460px, calc(100% - 24px)); background: rgba(16,6,32,.92);
+  border: 3px solid var(--teal); border-radius: 16px; padding: 12px 16px; text-align: center; animation: toast-in .4s; }
+.vote-result b { color: var(--teal); font-family: var(--display); font-weight: 400; font-size: 1.05rem; display: block; margin-bottom: 4px; }
 .pz-prompt.multi { white-space: pre-line; font-family: var(--body); font-weight: 700; font-size: 1.35rem; line-height: 1.45; }
 .pz-dice { display: flex; justify-content: center; gap: 12px; margin: 10px 0 12px; flex-wrap: wrap; }
 .die { width: 58px; height: 58px; border-radius: 12px; background: #fff; border: 3px solid var(--ink); display: grid; grid-template-columns: repeat(3, 1fr); padding: 6px; gap: 2px; transform: rotate(var(--r)); box-shadow: 0 4px 0 rgba(0,0,0,.25); }

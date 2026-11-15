@@ -28,9 +28,11 @@ const ACHIEVEMENTS = [
   { id: 'level_20', icon: '💫', name: 'Superstar', desc: 'Reach level 20', check: (s, level) => level >= 20 },
   { id: 'top_day', icon: '🥇', name: 'Star of the Day', desc: 'Top the daily leaderboard', check: (s) => s.topDay >= 1 },
   { id: 'wave', icon: '🌊', name: 'Make Waves', desc: 'Be part of a Mexican wave', check: (s) => s.waves >= 1 },
+  { id: 'fortune', icon: '🔮', name: 'Fortune Teller', desc: 'Correctly predict the winner of a final', check: (s) => s.predicted >= 1 },
+  { id: 'oracle', icon: '🧿', name: 'The Oracle', desc: 'Correctly predict 10 finals', check: (s) => s.predicted >= 10 },
   { id: 'wave_25', icon: '🏄', name: 'Wave Machine', desc: 'Be part of 25 Mexican waves', check: (s) => s.waves >= 25 },
 ];
-const STAT_KEYS = ['games', 'wins', 'seats', 'streak', 'bestStreak', 'fastest', 'trivia', 'action', 'emotes', 'hosted', 'finals', 'flawless', 'topDay', 'waves'];
+const STAT_KEYS = ['games', 'wins', 'seats', 'streak', 'bestStreak', 'fastest', 'trivia', 'action', 'emotes', 'hosted', 'finals', 'flawless', 'topDay', 'waves', 'predicted'];
 function normStats(raw) {
   let s = raw;
   if (typeof s === 'string') { try { s = JSON.parse(s); } catch { s = {}; } }

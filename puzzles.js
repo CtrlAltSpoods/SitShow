@@ -76,6 +76,28 @@ const COMPOUNDS = [
   ['HIGH', 'CHAIR', 'SPOON', 'CARPET', 'GRAPE'],
   ['MOON', 'LIGHT', 'FORK', 'BRICK', 'SOCK'],
 ];
+// [word, its opposite, three that aren't]
+const OPPOSITES = [
+  ['ancient', 'modern', 'old', 'antique', 'ruined'],
+  ['generous', 'stingy', 'kind', 'giving', 'rich'],
+  ['brave', 'cowardly', 'bold', 'heroic', 'strong'],
+  ['shallow', 'deep', 'wide', 'narrow', 'flat'],
+  ['victory', 'defeat', 'triumph', 'success', 'battle'],
+  ['ascend', 'descend', 'climb', 'rise', 'soar'],
+  ['expand', 'shrink', 'grow', 'stretch', 'swell'],
+  ['noisy', 'quiet', 'loud', 'busy', 'crowded'],
+  ['rough', 'smooth', 'tough', 'harsh', 'bumpy'],
+  ['arrive', 'depart', 'reach', 'enter', 'land'],
+  ['transparent', 'opaque', 'clear', 'glassy', 'shiny'],
+  ['permanent', 'temporary', 'lasting', 'fixed', 'stable'],
+  ['scarce', 'plentiful', 'rare', 'few', 'limited'],
+  ['accept', 'refuse', 'agree', 'allow', 'take'],
+  ['innocent', 'guilty', 'pure', 'naive', 'honest'],
+  ['triumph', 'failure', 'win', 'glory', 'parade'],
+];
+const PRIMES = [11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97];
+const ODD_COMPOSITES = [21, 25, 27, 33, 35, 39, 45, 49, 51, 55, 57, 63, 65, 69, 75, 77, 81, 85, 87, 91, 93, 95];
+const LOOKALIKES = [['O', 'Q'], ['b', 'd'], ['8', 'B'], ['E', 'F'], ['M', 'N'], ['p', 'q'], ['6', '9'], ['m', 'n'], ['C', 'G'], ['P', 'R'], ['u', 'v'], ['5', 'S'], ['W', 'V'], ['h', 'n']];
 const ROMAN = [[1000, 'M'], [900, 'CM'], [500, 'D'], [400, 'CD'], [100, 'C'], [90, 'XC'], [50, 'L'], [40, 'XL'], [10, 'X'], [9, 'IX'], [5, 'V'], [4, 'IV'], [1, 'I']];
 const toRoman = (n) => { let s = ''; for (const [v, r] of ROMAN) while (n >= v) { s += r; n -= v; } return s; };
 const SIMON = 4; // coloured pads
@@ -275,13 +297,13 @@ const G = {
   },
   stroop() {
     const [word, ink, x, y] = shuffle(INKS);
-    return { pub: { kind: 'choice', title: 'What COLOUR is the ink? (not the word!)', prompt: word[0], ink: ink[1], choices: shuffle([word[0], ink[0], x[0], y[0]]) }, answer: ink[0] };
+    return { pub: { kind: 'choice', colour: true, title: 'What COLOUR is the ink? (not the word!)', prompt: word[0], ink: ink[1], choices: shuffle([word[0], ink[0], x[0], y[0]]) }, answer: ink[0] };
   },
   shade() {
     const h = rnd(360), s = 55 + rnd(30), l = 42 + rnd(16), d = (rnd(2) ? 1 : -1) * (7 + rnd(4));
     const n = 25, odd = rnd(n);
     const colors = Array.from({ length: n }, (_, i) => `hsl(${h} ${s}% ${i === odd ? l + d : l}%)`);
-    return { pub: { kind: 'grid', title: 'Tap the tile that\'s a different shade', cols: 5, colors }, answer: String(odd) };
+    return { pub: { kind: 'grid', colour: true, title: 'Tap the tile that\'s a different shade', cols: 5, colors }, answer: String(odd) };
   },
   hunt() {
     const n = 12;
@@ -343,6 +365,28 @@ const G = {
     const target = (15 + rnd(26)) * 100; // 1.5–4.0 s
     return { pub: { kind: 'stopwatch', title: `Stop the clock at exactly ${(target / 1000).toFixed(1)} s`, target }, kind: 'stopwatch', target };
   },
+  opposites() {
+    const [w, ok, ...bad] = pick(OPPOSITES);
+    return { pub: { kind: 'choice', title: `What's the opposite of ${w.toUpperCase()}?`, prompt: '', choices: shuffle([ok, ...bad]) }, answer: ok };
+  },
+  prime() {
+    const p = pick(PRIMES);
+    return { pub: { kind: 'choice', title: 'Which one is a prime number?', prompt: '', choices: shuffle([p, ...shuffle(ODD_COMPOSITES).slice(0, 3)]).map(String) }, answer: String(p) };
+  },
+  lookalike() { // a grid of one character with a single look-alike hiding in it
+    const [a, b] = shuffle(pick(LOOKALIKES)), n = 30, i = rnd(n);
+    return { pub: { kind: 'textgrid', title: `Find the ${b} hiding among the ${a}s`, cols: 6, cells: Array.from({ length: n }, (_, k) => (k === i ? b : a)) }, answer: String(i) };
+  },
+  flashCount() { // dots flash up for a moment, then vanish: how many were there?
+    const n = 6 + rnd(9), cells = shuffle(Array.from({ length: 25 }, (_, k) => k)).slice(0, n);
+    const opts = new Set([n]);
+    while (opts.size < 4) { const o = n + rnd(7) - 3; if (o > 0) opts.add(o); }
+    return { pub: { kind: 'flash', title: 'How many dots flashed up?', cells, choices: shuffle([...opts]).map(String) }, answer: String(n) };
+  },
+  rhythm() { // a metronome ticks 4 times; tap 5 times at the same speed (server checks the gaps)
+    const period = 380 + rnd(9) * 40; // 380–700 ms
+    return { pub: { kind: 'rhythm', title: 'Copy the rhythm — tap 5 times at the same speed', period }, kind: 'rhythm', target: period };
+  },
   reaction() {
     return { pub: { kind: 'reaction', title: 'Wait for GREEN… then hit it!' }, kind: 'reaction' };
   },
@@ -354,10 +398,10 @@ const G = {
 
 // Host-selectable groups. Trivia categories share one "trivia" slot so they don't crowd out the rest.
 const GROUPS = [
-  { id: 'brain', name: 'Brain teasers', gens: ['maths', 'sequence', 'biggest', 'count', 'emojiMath', 'roman', 'dice'] },
-  { id: 'words', name: 'Word games', gens: ['unscramble', 'backwards', 'vowels', 'spelling', 'speedType', 'rhyme', 'compound'] },
-  { id: 'eyes', name: 'Sharp eyes', gens: ['oddOne', 'stroop', 'shade', 'hunt', 'spotDiff', 'clock'] },
-  { id: 'action', name: 'Action games', gens: ['reaction', 'mash', 'memory', 'simon', 'stopwatch'] },
+  { id: 'brain', name: 'Brain teasers', gens: ['maths', 'sequence', 'biggest', 'count', 'emojiMath', 'roman', 'dice', 'prime'] },
+  { id: 'words', name: 'Word games', gens: ['unscramble', 'backwards', 'vowels', 'spelling', 'speedType', 'rhyme', 'compound', 'opposites'] },
+  { id: 'eyes', name: 'Sharp eyes', gens: ['oddOne', 'stroop', 'shade', 'hunt', 'spotDiff', 'clock', 'lookalike', 'flashCount'] },
+  { id: 'action', name: 'Action games', gens: ['reaction', 'mash', 'memory', 'simon', 'stopwatch', 'rhythm'] },
   { id: 'geo', name: 'Geography', trivia: true },
   { id: 'sci', name: 'Science', trivia: true },
   { id: 'space', name: 'Space', trivia: true },

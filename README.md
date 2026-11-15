@@ -108,8 +108,8 @@ If your proxy rewrites the `Host` header, set `PUBLIC_ORIGIN=https://sitshow.exa
 - **Player cards**: click any name in a leaderboard or the player list (or 🪪 My card)
   to see level, ranks, stats (shows, wins, win rate, chairs, best streak, fastest seat,
   finals, shows hosted) and achievements.
-- **24 achievements**, from *Opening Night* and *Quick Draw* to *Hat Trick*, *Packed House*
-  (win with 16+ players) and *Star of the Day*. Unlocks pop up during the show.
+- **26 achievements**, from *Opening Night* and *Quick Draw* to *Hat Trick*, *Packed House*
+  (win with 16+ players), *Star of the Day* and *The Oracle* (call 10 finals). Unlocks pop up during the show.
 
 ## Hosting a show
 
@@ -130,11 +130,15 @@ to the original host when they reconnect. Anyone who drops keeps their spot for 
 
 | Group | Challenges |
 | --- | --- |
-| Brain teasers | quick maths, what comes next, biggest sum, count the emoji, emoji maths, Roman numerals, add up the dice |
-| Word games | unscramble, type it backwards, missing vowels, spot the correct spelling, speed typing, rhymes, finish the compound word |
-| Sharp eyes | odd one out, ink colour (Stroop), odd-shade tile, tap 1–12 in order, spot the difference, read the clock |
-| Action games | reaction (wait for green), button mash, memory sequence, Simon says, stop the clock at exactly N seconds |
+| Brain teasers | quick maths, what comes next, biggest sum, count the emoji, emoji maths, Roman numerals, add up the dice, spot the prime |
+| Word games | unscramble, type it backwards, missing vowels, spot the correct spelling, speed typing, rhymes, finish the compound word, opposites |
+| Sharp eyes | odd one out, ink colour (Stroop) 🎨, odd-shade tile 🎨, tap 1–12 in order, spot the difference, read the clock, find the look-alike letter, count the flashing dots |
+| Action games | reaction (wait for green), button mash, memory sequence, Simon says, stop the clock at exactly N seconds, copy the rhythm |
 | Trivia | Geography, Science, Space, Music, Food & Drink, Animals, Sport, General Knowledge — multiple choice and true/false |
+
+**Colourblind mode** (🎨 on the home page or in the room's top bar) means you never start on a
+colour challenge (marked 🎨 above): auto-pick goes for another chair, and colour chairs get a 🎨
+marker on their tab. You can still switch to one yourself.
 
 ## Features
 
@@ -151,7 +155,10 @@ to the original host when they reconnect. Anyone who drops keeps their spot for 
   leaderboards and player cards while they're offline and follows them to new devices.
 - **Emotes**, **levels and XP**, and unlockable **dances**, **dramatic exits**,
   **avatar frames** and more emotes. The wardrobe sits in the profile panel on the
-  home page and behind 🎭 in a show; you can preview locked items.
+  home page and behind 🎭 in a show; you can preview locked items. There are 15 dances (up
+  to *Levitate* at level 26) and 11 frames; the higher frames are fully animated: *Inferno*
+  (11), *Tesla Coil* (17), *Galaxy* with orbiting planets (23), *Phoenix* wings (27) and
+  *Cosmic Legend* (30).
 - Up to **30 players** per show (bots included). Big shows use two rings of chairs and
   knock out about a sixth of the field each round, so a full studio finishes in ~12 rounds.
 - **The gallery**: knocked-out players and late joiners watch from a stepped platform on
@@ -162,6 +169,10 @@ to the original host when they reconnect. Anyone who drops keeps their spot for 
   on phones, where it opens as a drawer over the stage.
 - **The DJ** (desktop): a DJ booth above the crowd, beside the gallery, spinning along
   and bopping on the beat.
+- **The gallery predicts the final**: when two players are left, the show pauses for up to
+  14 seconds while everyone watching votes on who'll win, with live tallies. The finalists see
+  a sign saying the audience is voting. Correct guessers get **+30 XP** (and the *Fortune
+  Teller* / *Oracle* achievements) and are named on screen when the final ends.
 - **Mexican wave**: anyone in the green room or the gallery can press 🌊 Wave; when enough
   of them join within 3 seconds, the crowd and the gallery ripple across the screen.
 - Account holders have a blue ✓ next to their name. Volume starts at 10%.

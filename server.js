@@ -31,7 +31,9 @@ const MAX_PLAYERS = 30;
 
 const T_INTRO = 3500;
 const T_RESULTS = 5200;
-const T_GAMEOVER = 10000;
+const T_GAMEOVER = 12000;
+const T_VOTE = 14000;    // the gallery predicts the winner before the final
+const VOTE_BONUS = 30;   // XP for a correct prediction
 const WRONG_LOCK = 2000;
 const MASH_GAP = 50; // ms between counted taps
 
@@ -61,6 +63,13 @@ const CATALOG = {
     { id: 'moonwalk', name: 'Moonwalk', level: 10 },
     { id: 'robot', name: 'The Robot', level: 13 },
     { id: 'floss', name: 'Floss', level: 16 },
+    { id: 'disco', name: 'Disco Point', level: 4 },
+    { id: 'chicken', name: 'Chicken Dance', level: 6 },
+    { id: 'sprinkler', name: 'The Sprinkler', level: 9 },
+    { id: 'shuffle', name: 'Shuffle', level: 12 },
+    { id: 'dab', name: 'Dab', level: 18 },
+    { id: 'flip', name: 'Backflip', level: 22 },
+    { id: 'levitate', name: 'Levitate', level: 26 },
   ],
   deaths: [
     { id: 'poof', name: 'Poof', level: 1 },
@@ -78,6 +87,12 @@ const CATALOG = {
     { id: 'neon', name: 'Neon Buzz', level: 8 },
     { id: 'rainbow', name: 'Rainbow', level: 14 },
     { id: 'crown', name: 'Champion Crown', level: 20 },
+    { id: 'sparkle', name: 'Sparkle', level: 5 },
+    { id: 'fire', name: 'Inferno', level: 11 },
+    { id: 'electric', name: 'Tesla Coil', level: 17 },
+    { id: 'galaxy', name: 'Galaxy', level: 23 },
+    { id: 'phoenix', name: 'Phoenix', level: 27 },
+    { id: 'legend', name: 'Cosmic Legend', level: 30 },
   ],
   emotes: [
     { id: 'wave', e: '👋', level: 1 }, { id: 'lol', e: '😂', level: 1 },
@@ -384,6 +399,7 @@ function roomState(room) {
     })),
     players: [...room.players.values()].map(pubPlayer),
     out: room.lastOut, nobody: room.nobody, winner: room.winner, standings: room.standings,
+    vote: room.phase === 'vote' ? voteTally(room) : null, voteResult: room.voteResult || null,
   };
 }
 function sendRoom(room, obj) {
@@ -434,14 +450,14 @@ function resetSeats(room) {
 function resetToLobby(room) {
   clearTimeout(room.timer); clearChairTimers(room);
   room.phase = 'lobby'; room.round = 0; room.chairs = []; room.currentSong = null; room.phaseEnds = 0;
-  room.lastOut = []; room.nobody = false; room.winner = null; room.standings = null;
+  room.lastOut = []; room.nobody = false; room.winner = null; room.standings = null; room.vote = null; room.voteResult = null;
   resetSeats(room);
   for (const p of room.players.values()) { p.inGame = false; p.alive = false; }
   pushState(room); pushLobby();
 }
 function startGame(room) {
   if (room.phase !== 'lobby' || room.players.size < 2) return;
-  room.outOrder = []; room.winner = null; room.standings = null; room.round = 0; room.lastSong = null;
+  room.outOrder = []; room.winner = null; room.standings = null; room.round = 0; room.lastSong = null; room.vote = null; room.voteResult = null;
   for (const p of room.players.values()) { p.inGame = true; p.alive = true; p.seats = 0; p.wrongs = 0; p.final = false; }
   room.field = room.players.size;
   resetSeats(room);
@@ -458,9 +474,32 @@ function pickSong(room) {
   const fresh = pool.length > 1 ? pool.filter((x) => x !== room.lastSong) : pool;
   return pick(fresh);
 }
+// Before the final, the gallery predicts the winner. Anyone watching (knocked out, or joined late) can vote.
+const voters = (room) => [...room.players.values()].filter((p) => !p.bot && p.conn && !(p.inGame && p.alive));
+function startVote(room, finalists) {
+  room.phase = 'vote';
+  room.vote = { candidates: finalists.map((p) => p.id), votes: new Map(), done: false };
+  room.chairs = [];
+  resetSeats(room);
+  setPhaseTimer(room, T_VOTE, () => finishVote(room));
+  pushState(room);
+}
+function finishVote(room) {
+  if (room.phase !== 'vote') return;
+  clearTimeout(room.timer);
+  room.vote.done = true;
+  beginRound(room);
+}
+function voteTally(room) {
+  if (!room.vote) return null;
+  const counts = Object.fromEntries(room.vote.candidates.map((id) => [id, 0]));
+  for (const id of room.vote.votes.values()) if (id in counts) counts[id]++;
+  return { candidates: room.vote.candidates, counts, total: room.vote.votes.size, voters: voters(room).length };
+}
 function beginRound(room) {
   const alive = alivePlayers(room);
   if (alive.length <= 1) return endGame(room);
+  if (alive.length === 2 && !room.vote && voters(room).length) return startVote(room, alive);
   room.round++;
   room.lastOut = []; room.nobody = false;
   resetSeats(room);
@@ -563,10 +602,29 @@ function endGame(room) {
   room.winner = winner ? winner.id : null;
   room.standings = [...(winner ? [{ id: winner.id, name: winner.prof.name }] : []), ...room.outOrder.slice().reverse()].slice(0, 12);
   room.chairs = [];
+  // gallery predictions
+  const predicted = new Map(); // voter id -> correct?
+  if (room.vote && winner) {
+    for (const [vid, cid] of room.vote.votes) predicted.set(vid, cid === winner.id);
+    const correct = [...predicted].filter(([, ok]) => ok).map(([vid]) => room.players.get(vid)).filter(Boolean);
+    room.voteResult = { winner: winner.id, voters: predicted.size, bonus: VOTE_BONUS, correct: correct.map((p) => ({ id: p.id, name: p.prof.name })) };
+  }
   for (const p of room.players.values()) {
-    if (p.bot || !p.inGame) continue;
+    if (p.bot || (!p.inGame && !predicted.has(p.id))) continue;
     const before = levelForXp(p.prof.xp);
-    const gained = 15 + 12 * (p.seats || 0) + (winner === p ? 50 : 0);
+    const called = predicted.get(p.id) === true;
+    if (predicted.has(p.id)) bump(p, (st) => { if (called) st.predicted++; });
+    if (!p.inGame) { // watched and predicted, but didn't play this show
+      const gained = called ? VOTE_BONUS : 0;
+      if (gained) {
+        p.prof.xp += gained; saveProf(p.prof);
+        try { store.addScore(p.prof.id, today(), gained, false); } catch {}
+        if (p.conn) p.conn.send({ t: 'xp', gained, called, leveled: levelForXp(p.prof.xp) > before, unlocked: [], me: meInfo(p.conn) });
+      }
+      award(p);
+      continue;
+    }
+    const gained = 15 + 12 * (p.seats || 0) + (winner === p ? 50 : 0) + (called ? VOTE_BONUS : 0);
     p.prof.xp += gained;
     const after = levelForXp(p.prof.xp);
     const unlocked = [];
@@ -586,7 +644,7 @@ function endGame(room) {
       if (row && store.rankDay(day, row.points) === 1) st.topDay++;
     } catch (e) { console.warn('score save failed', e.message); }
     saveProf(p.prof);
-    if (p.conn) p.conn.send({ t: 'xp', gained, leveled: after > before, unlocked, me: meInfo(p.conn) });
+    if (p.conn) p.conn.send({ t: 'xp', gained, called, leveled: after > before, unlocked, me: meInfo(p.conn) });
     award(p, { won, field: room.field || room.players.size });
   }
   setPhaseTimer(room, T_GAMEOVER, () => resetToLobby(room));
@@ -797,6 +855,19 @@ const handlers = {
     sendRoom(room, msg);
   },
 
+  vote(conn, m) { // predict the winner of the final
+    const room = conn.room; if (!room || room.phase !== 'vote') return;
+    const p = room.players.get(conn.pid); if (!p || (p.inGame && p.alive)) return;
+    const id = String(m.id || '');
+    if (!room.vote.candidates.includes(id)) return;
+    room.vote.votes.set(p.id, id);
+    pushState(room);
+    const all = voters(room);
+    if (all.length && all.every((v) => room.vote.votes.has(v.id)) && room.phaseEnds - Date.now() > 3000) {
+      setPhaseTimer(room, 3000, () => finishVote(room)); // everyone's voted: a short drumroll, then the final
+    }
+  },
+
   // Mexican wave: anyone not currently competing (green room, gallery) can call for one. When enough
   // of them press within 3 s, the whole crowd goes.
   wave(conn) {
@@ -865,6 +936,16 @@ const handlers = {
     if (chair.kind === 'reaction') {
       if (now < chair.goAt) return wrongAnswer(room, p, i); // false start
       return void claimChair(room, p, i);
+    }
+    if (chair.kind === 'rhythm') { // 5 taps → 4 gaps, each within 18% of the metronome's beat
+      const list = chair.sw.get(p.id) || [];
+      if (list.length && now - list[list.length - 1] > chair.target * 2.5) list.length = 0; // gave up and restarted
+      list.push(now); chair.sw.set(p.id, list);
+      if (list.length < 5) return;
+      chair.sw.delete(p.id);
+      const gaps = list.slice(1).map((x, k) => x - list[k]), ok = gaps.every((g) => Math.abs(g - chair.target) <= chair.target * 0.18);
+      if (p.conn) p.conn.send({ t: 'rhythm', chair: i, gaps, ok });
+      return ok ? void claimChair(room, p, i) : wrongAnswer(room, p, i);
     }
     if (chair.kind === 'stopwatch') { // first tap starts the clock, second stops it; within ±0.15 s wins
       const started = chair.sw.get(p.id);

@@ -36,6 +36,9 @@ function solve(pz) { // answers for every challenge that can be worked out from 
   if (pz.kind === 'memory' || pz.kind === 'simon') return pz.seq.join(',');
   if (pz.kind === 'spotdiff') return String(pz.left.findIndex((x, i) => x !== pz.right[i]));
   if (pz.kind === 'dice') return String(pz.dice.reduce((a, b) => a + b));
+  if (pz.kind === 'textgrid') { const cnt = {}; pz.cells.forEach((c) => (cnt[c] = (cnt[c] || 0) + 1)); return String(pz.cells.findIndex((c) => cnt[c] === 1)); }
+  if (pz.kind === 'flash') return String(pz.cells.length);
+  if (pz.title === 'Which one is a prime number?') return pz.choices.find((c) => { for (let d = 2; d * d <= +c; d++) if (+c % d === 0) return false; return true; });
   if (pz.kind === 'clock') return `${pz.h}:${String(pz.m).padStart(2, '0')}`;
   if (pz.title.startsWith('Roman')) { const v = { I: 1, V: 5, X: 10, L: 50, C: 100, D: 500, M: 1000 }; let n = 0; for (let i = 0; i < p.length; i++) n += v[p[i]] < (v[p[i + 1]] || 0) ? -v[p[i]] : v[p[i]]; return String(n); }
   if (pz.title === 'Quick maths!') return String(eval(p.replace(' = ?', '').replace(/×/g, '*').replace(/−/g, '-')));
@@ -60,7 +63,7 @@ function autoplay(c, stats) {
     const me = m.players.find((p) => p.id === c.me.id);
     if (!me || !me.alive || me.seat != null) return;
     const free = m.chairs.map((ch, i) => [ch, i]).filter(([ch]) => !ch.owner && ch.puzzle);
-    const tapGame = free.find(([ch]) => ['reaction', 'mash', 'stopwatch'].includes(ch.puzzle.kind));
+    const tapGame = free.find(([ch]) => ['reaction', 'mash', 'stopwatch', 'rhythm'].includes(ch.puzzle.kind));
     const pickOne = tapGame || free.find(([ch]) => solve(ch.puzzle) != null);
     if (!pickOne) return;
     const [ch, i] = pickOne, pz = ch.puzzle, key = m.round + ':' + i + ':' + (pz.go ? 'go' : '');
@@ -74,6 +77,9 @@ function autoplay(c, stats) {
     } else if (pz.kind === 'stopwatch') {
       c.send({ t: 'tap', chair: i }); setTimeout(() => c.send({ t: 'tap', chair: i }), pz.target);
       c.wait((m) => m.t === 'sw', 15000).then((m) => { stats.sw = m; }).catch(() => {});
+    } else if (pz.kind === 'rhythm') {
+      for (let k = 0; k < 5; k++) setTimeout(() => c.send({ t: 'tap', chair: i }), k * pz.period);
+      c.wait((m) => m.t === 'rhythm', 15000).then((m) => { stats.rhythm = m; }).catch(() => {});
     } else if (pz.kind === 'mash') {
       let n = 0; const iv = setInterval(() => { if (++n > pz.need + 5 || c.room.phase !== 'scramble') clearInterval(iv); c.send({ t: 'tap', chair: i }); }, 65);
     } else {
@@ -161,10 +167,30 @@ function autoplay(c, stats) {
   H.send({ t: 'chat', text: 'can I talk?' }); // still in the show → refused
   await H.wait((m) => m.t === 'toast' && /Chat opens/.test(m.msg));
   console.log('in-show chat blocked for players still in');
+  // a spectator drops in mid-show and predicts the final
+  const V = client('Viv'); await V.wait((m) => m.t === 'welcome');
+  V.send({ t: 'joinRoom', code: room.code, password: 'hunter2' }); await V.wait((m) => m.t === 'joined');
+  const voteState = await V.wait((m) => m.t === 'room' && m.phase === 'vote', 300000);
+  assert.equal(voteState.vote.candidates.length, 2);
+  const finalistSees = voteState.vote.candidates.includes(H.me.id) ? H : null;
+  V.send({ t: 'vote', id: voteState.vote.candidates[0] });
+  const counted = await V.wait((m) => m.t === 'room' && m.phase === 'vote' && m.vote.total >= 1);
+  assert.equal(counted.vote.counts[voteState.vote.candidates[0]], 1);
+  if (finalistSees) { H.send({ t: 'vote', id: voteState.vote.candidates[1] }); await sleep(200); }
+  const t0 = Date.now();
+  const fin = await V.wait((m) => m.t === 'room' && m.phase === 'intro' && m.round > voteState.round, 20000);
+  assert.ok(fin.players.filter((p) => p.alive).length === 2);
+  console.log(`gallery vote ok (all voted → final began ${((Date.now() - t0) / 1000).toFixed(1)} s later)`);
   const over = await H.wait((m) => m.t === 'room' && m.phase === 'gameover', 300000);
   console.log('winner:', over.standings[0].name, '| order:', over.standings.map((s) => s.name).join(' > '));
   console.log('music seconds:', stats.music.map((x) => (x / 1000).toFixed(1)).join(', '), '| manual pauses:', stats.readies);
-  console.log('challenges played:', [...stats.kinds].join(', '), stats.sw ? `| stopwatch ${stats.sw.dt} ms → ${stats.sw.ok ? 'ok' : 'miss'}` : '');
+  assert.ok(over.voteResult && over.voteResult.voters === 1, 'vote result reported');
+  const called = over.voteResult.correct.some((c) => c.id === V.me.id);
+  assert.equal(called, over.winner === voteState.vote.candidates[0]);
+  if (called) { const xp = await V.wait((m) => m.t === 'xp'); assert.ok(xp.called && xp.gained === 30); }
+  console.log('prediction:', called ? 'Viv called it (+30 XP)' : 'Viv guessed wrong (no bonus)');
+  V.ws.close();
+  console.log('challenges played:', [...stats.kinds].join(', '), stats.sw ? `| stopwatch ${stats.sw.dt} ms → ${stats.sw.ok ? 'ok' : 'miss'}` : '', stats.rhythm ? `| rhythm ${stats.rhythm.gaps.join('/')} → ${stats.rhythm.ok ? 'ok' : 'miss'}` : '');
   assert.ok(stats.music.every((x) => x >= 2900 && x <= 4300), 'music within host range');
   assert.ok(stats.readies >= 1, 'manual mode paused between rounds');
   assert.ok(H.events.some((m) => m.t === 'wrong') || B.events.some((m) => m.t === 'wrong'), 'wrong answers lock');
