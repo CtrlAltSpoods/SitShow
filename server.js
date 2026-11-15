@@ -41,7 +41,8 @@ if (typeof process.getuid === 'function' && process.getuid() === 0 && process.en
   const uid = +process.env.PUID, gid = +(process.env.PGID || process.env.PUID);
   try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
   try { fs.mkdirSync(MUSIC_DIR, { recursive: true }); } catch {}
-  for (const p of [DATA_DIR, PROFILE_FILE, DB_FILE, DB_FILE + '-wal', DB_FILE + '-shm', MUSIC_DIR]) {
+  try { fs.mkdirSync(path.join(DATA_DIR, 'avatars'), { recursive: true }); } catch {}
+  for (const p of [DATA_DIR, path.join(DATA_DIR, 'avatars'), PROFILE_FILE, DB_FILE, DB_FILE + '-wal', DB_FILE + '-shm', MUSIC_DIR]) {
     try { if (fs.existsSync(p)) fs.chownSync(p, uid, gid); } catch {} // read-only music mounts are fine
   }
   try { process.setgid(gid); process.setuid(uid); console.log(`Running as ${uid}:${gid}`); }
@@ -259,7 +260,41 @@ execFile('ffmpeg', ['-hide_banner', '-version'], (e) => {
 });
 
 // ───────────────────────────── avatars (memory only, removed 5 min after disconnect) ─────────────────────────────
-const avatars = new Map(); // pid -> { buf, type, hash, timer }
+const avatars = new Map(); // pid -> { buf, type, hash, timer }  (in memory while connected + 5 min)
+// Accounts also keep their picture on disk: data/avatars/<account id>.<jpg|png|webp>
+const AVATAR_DIR = path.join(DATA_DIR, 'avatars');
+const AVATAR_EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
+const isAccountId = (id) => /^u[a-z2-9]{10}$/.test(id);
+const avatarHash = (buf) => crypto.createHash('sha1').update(buf).digest('hex').slice(0, 12);
+const savedAvatars = new Map(); // id -> { buf, type, hash } | null (looked, none on disk)
+function savedAvatar(id) {
+  if (!isAccountId(id)) return null;
+  if (savedAvatars.has(id)) return savedAvatars.get(id);
+  let found = null;
+  for (const [type, ext] of Object.entries(AVATAR_EXT)) {
+    try { const buf = fs.readFileSync(path.join(AVATAR_DIR, `${id}.${ext}`)); found = { buf, type, hash: avatarHash(buf) }; break; } catch {}
+  }
+  savedAvatars.set(id, found);
+  if (savedAvatars.size > 2000) savedAvatars.delete(savedAvatars.keys().next().value);
+  return found;
+}
+function saveAccountAvatar(id, av) { // av = null removes it
+  if (!isAccountId(id)) return;
+  try { fs.mkdirSync(AVATAR_DIR, { recursive: true }); } catch {}
+  for (const ext of Object.values(AVATAR_EXT)) {
+    if (av && ext === AVATAR_EXT[av.type]) continue;
+    try { fs.unlinkSync(path.join(AVATAR_DIR, `${id}.${ext}`)); } catch {}
+  }
+  if (av) {
+    const file = path.join(AVATAR_DIR, `${id}.${AVATAR_EXT[av.type]}`);
+    fs.writeFile(file + '.tmp', av.buf, (e) => {
+      if (e) return console.warn('Could not save avatar for', id, e.message);
+      fs.rename(file + '.tmp', file, () => {});
+    });
+  }
+  savedAvatars.set(id, av ? { buf: av.buf, type: av.type, hash: av.hash } : null);
+}
+const avatarOf = (id) => avatars.get(id) || savedAvatar(id);
 function sniffImage(buf) {
   if (buf.length > 12 && buf[0] === 0xff && buf[1] === 0xd8) return 'image/jpeg';
   if (buf.length > 12 && buf.readUInt32BE(0) === 0x89504e47) return 'image/png';
@@ -321,7 +356,7 @@ function meInfo(conn) {
     id: conn.pid, name: p.name, xp: p.xp, level,
     levelXp: xpForLevel(level), nextXp: xpForLevel(level + 1),
     dance: p.dance, death: p.death, ring: p.ring,
-    av: avatars.get(conn.pid)?.hash || null,
+    av: avatarOf(conn.pid)?.hash || null,
     account: !!p.account, reserved: !!p.name_key,
     passkeys: p.account ? store.credentials(p.id).length : 0,
   };
@@ -330,7 +365,7 @@ function pubPlayer(p) {
   const prof = p.prof;
   return {
     id: p.id, name: prof.name, level: p.bot ? p.level : levelForXp(prof.xp),
-    av: p.bot ? null : avatars.get(p.id)?.hash || null, face: p.face || null,
+    av: p.bot ? null : avatarOf(p.id)?.hash || null, face: p.face || null,
     dance: prof.dance, death: prof.death, ring: prof.ring,
     inGame: p.inGame, alive: p.alive, seat: p.seat, pick: p.pick, bot: !!p.bot, away: !p.bot && !p.conn, acct: !!prof.account,
   };
@@ -740,7 +775,7 @@ const handlers = {
     const day = today(), d = store.dayRow(id, day);
     conn.send({
       t: 'card', id, name: row.name, xp: row.xp, level: levelForXp(row.xp), acct: !!row.account, created: row.created,
-      dance: row.dance, death: row.death, ring: row.ring, av: avatars.get(id)?.hash || null, online: byPid.has(id),
+      dance: row.dance, death: row.death, ring: row.ring, av: avatarOf(id)?.hash || null, online: byPid.has(id),
       stats, achievements: store.achievements(id), levelRank: row.xp > 0 ? store.rankLevel(row.xp) : null,
       today: d ? { ...d, rank: store.rankDay(day, d.points) } : null,
     });
@@ -1079,6 +1114,8 @@ function passkeyRoute(pathname, req, res, body) {
       if (key) evictName(key, p.id);
     }
     store.addCredential({ ...cred, playerId: p.id });
+    const av = avatars.get(p.id);
+    if (av && !savedAvatar(p.id)) saveAccountAvatar(p.id, av); // a new account keeps the picture it had as a guest
     conn.send({ t: 'me', me: meInfo(conn) });
     if (conn.room) pushState(conn.room);
     return sendJson(res, 200, { ok: true, id: p.id });
@@ -1119,6 +1156,7 @@ const server = http.createServer((req, res) => {
     if (req.method === 'DELETE') {
       const av = avatars.get(conn.pid);
       if (av) { clearTimeout(av.timer); avatars.delete(conn.pid); }
+      if (conn.prof.account) saveAccountAvatar(conn.pid, null);
       avatarChanged(conn);
       return sendJson(res, 200, { ok: true });
     }
@@ -1139,8 +1177,9 @@ const server = http.createServer((req, res) => {
       if (!now) return sendJson(res, 401, { error: 'not connected' });
       const old = avatars.get(now.pid);
       if (old) clearTimeout(old.timer);
-      const hash = crypto.createHash('sha1').update(buf).digest('hex').slice(0, 12);
+      const hash = avatarHash(buf);
       avatars.set(now.pid, { buf, type, hash, timer: null });
+      if (now.prof.account) saveAccountAvatar(now.pid, { buf, type, hash });
       avatarChanged(now);
       sendJson(res, 200, { hash });
     });
@@ -1158,7 +1197,7 @@ const server = http.createServer((req, res) => {
   if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405); return res.end(); }
 
   if (pathname.startsWith('/avatar/')) {
-    const av = avatars.get(pathname.slice(8));
+    const av = avatarOf(pathname.slice(8));
     if (!av) { res.writeHead(404); return res.end(); }
     res.writeHead(200, { 'content-type': av.type, 'content-length': av.buf.length, 'cache-control': 'private, max-age=300' });
     return res.end(req.method === 'HEAD' ? undefined : av.buf);

@@ -88,6 +88,12 @@ function client(token = crypto.randomBytes(16).toString('hex'), name = '') {
   const G = client(undefined, 'jAKe');
   assert.equal((await G.wait((m) => m.t === 'welcome')).me.name, 'jAKe');
 
+  // a picture uploaded as a guest is kept when the account is created
+  const png = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.from('sitshow-test-avatar')]);
+  let up = await fetch(`http://${BASE}/api/avatar`, { method: 'POST', headers: { 'x-token': A.token }, body: png });
+  assert.equal(up.status, 200);
+  const avHash = (await up.json()).hash;
+
   // create the account
   const key = new SoftKey('ec');
   let r = await api('/api/passkey/register-options', A.token);
@@ -98,6 +104,13 @@ function client(token = crypto.randomBytes(16).toString('hex'), name = '') {
   const me = (await A.wait((m) => m.t === 'me' && m.me.account)).me;
   assert.ok(me.reserved && me.passkeys === 1);
   console.log('account created:', id, '(name reserved)');
+  assert.equal(me.av, avHash, 'account keeps its guest picture');
+  if (process.env.DATA_DIR) {
+    const f = require('path').join(process.env.DATA_DIR, 'avatars', id + '.png');
+    for (let i = 0; i < 20 && !require('fs').existsSync(f); i++) await sleep(50);
+    assert.ok(require('fs').existsSync(f), 'saved to ' + f);
+    console.log('avatar saved to avatars/' + id + '.png');
+  }
 
   // the online guest named jAKe was renamed; nobody else can take Jake / JAKE / j-a-k-e
   await G.wait((m) => m.t === 'toast' && /reserved/.test(m.msg));
@@ -140,6 +153,9 @@ function client(token = crypto.randomBytes(16).toString('hex'), name = '') {
   assert.equal(w2.me.id, id); assert.equal(w2.me.name, 'Jake The Great'); assert.ok(w2.me.account);
   await A.wait((m) => m.t === 'replaced'); // same account: the newest device takes over
   console.log('passkey sign-in on a second device → same ID', id);
+  assert.equal(w2.me.av, avHash, 'the saved picture follows the account to the new device');
+  const img = await fetch(`http://${BASE}/avatar/${id}?v=${avHash}`);
+  assert.equal(img.status, 200); assert.equal(Buffer.compare(Buffer.from(await img.arrayBuffer()), png), 0);
 
   // unknown passkey
   const stranger = new SoftKey('ec');
@@ -155,6 +171,16 @@ function client(token = crypto.randomBytes(16).toString('hex'), name = '') {
   r = await api('/api/passkey/login-options', '');
   assert.equal((await api('/api/passkey/login', '', ed.get(r.json))).status, 200);
   console.log('Ed25519 passkey ok');
+  // removing the picture deletes the saved file too
+  up = await fetch(`http://${BASE}/api/avatar`, { method: 'DELETE', headers: { 'x-token': good.json.token } });
+  assert.equal(up.status, 200);
+  if (process.env.DATA_DIR) { await sleep(100); assert.ok(!require('fs').existsSync(require('path').join(process.env.DATA_DIR, 'avatars', id + '.png')), 'file removed'); }
+  assert.equal((await fetch(`http://${BASE}/avatar/${id}`)).status, 404);
+  console.log('removing the picture deletes the file');
+  // put it back so the restart check below has something to find
+  up = await fetch(`http://${BASE}/api/avatar`, { method: 'POST', headers: { 'x-token': good.json.token }, body: png });
+  assert.equal(up.status, 200);
+  console.log('ACCOUNT_ID=' + id);
 
   // sign out ends the session; the token becomes a fresh guest
   assert.equal((await api('/api/logout', good.json.token)).status, 200);

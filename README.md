@@ -145,8 +145,10 @@ to the original host when they reconnect. Anyone who drops keeps their spot for 
   a welcome screen where they set their name and profile picture before joining.
 - **Rename in the room** — click your name in the side panel; click your picture to change it.
 - **Avatars** — uploaded photos are centre-cropped and shrunk to 256×256 in the
-  browser, cached in the browser's local storage, and held by the server in memory
-  only while you are connected, plus a 5-minute grace period after you disconnect.
+  browser and cached in the browser's local storage. For guests the server only holds
+  the picture in memory while they're connected, plus a 5-minute grace period. **Accounts**
+  also keep it on disk as `data/avatars/<account ID>.jpg|png|webp`, so it shows on
+  leaderboards and player cards while they're offline and follows them to new devices.
 - **Emotes**, **levels and XP**, and unlockable **dances**, **dramatic exits**,
   **avatar frames** and more emotes. The wardrobe sits in the profile panel on the
   home page and behind 🎭 in a show; you can preview locked items.
@@ -158,6 +160,8 @@ to the original host when they reconnect. Anyone who drops keeps their spot for 
   still in the show can read it but can't post until they're out or the show ends. « slides
   it away to a tab on the left (with an unread count); it starts hidden in streamer mode and
   on phones, where it opens as a drawer over the stage.
+- **The DJ** (desktop): a DJ booth above the crowd, beside the gallery, spinning along
+  and bopping on the beat.
 - **Mexican wave**: anyone in the green room or the gallery can press 🌊 Wave; when enough
   of them join within 3 seconds, the crowd and the gallery ripple across the screen.
 - Account holders have a blue ✓ next to their name. Volume starts at 10%.
@@ -173,7 +177,7 @@ games. A wrong answer (or jumping the gun on the reaction game) freezes you for 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `3000` | HTTP/WebSocket port |
-| `DATA_DIR` | `./data` (`/data` in Docker) | Holds `music/` and `sitshow.db` (players, accounts, passkeys) |
+| `DATA_DIR` | `./data` (`/data` in Docker) | Holds `music/`, `sitshow.db` (players, accounts, passkeys) and `avatars/` (account pictures) |
 | `MUSIC_DIR` | `$DATA_DIR/music` | Where MP3s are read from |
 | `PUBLIC_ORIGIN` | *(derived from the request)* | Your HTTPS address(es) for passkeys, comma-separated, e.g. `https://sitshow.example.com` |
 | `RP_ID` | *(the domain of the address)* | Passkey domain — set it to a parent domain to share passkeys across sub-domains |

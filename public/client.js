@@ -352,7 +352,7 @@ function passkeyError(e) {
   return (e && e.message) || 'Passkey failed.';
 }
 function switchToken(t) { // become a different player (signed in / signed out): reconnect with the new token
-  token = t; LS.set('sitshow.token', t); LS.del('sitshow.avatarHash');
+  token = t; LS.set('sitshow.token', t); LS.del('sitshow.avatarHash'); LS.del('sitshow.avatar'); // the account brings its own picture
   try { ws.close(); } catch {}
 }
 async function createPasskey() {
@@ -455,8 +455,22 @@ async function uploadAvatar(data) {
     if (res.ok) LS.set('sitshow.avatarHash', (await res.json()).hash);
   } catch {}
 }
-function syncAvatar() { // the server forgets avatars 5 minutes after you disconnect, so re-send from the local cache when needed
-  if (LS.get('sitshow.avatar') && S.me.av !== LS.get('sitshow.avatarHash')) uploadAvatar();
+function syncAvatar() {
+  const local = LS.get('sitshow.avatar'), localHash = LS.get('sitshow.avatarHash');
+  // accounts: the picture saved on the server wins, so a new device picks it up (and doesn't overwrite it)
+  if (S.me.account && S.me.av) { if (S.me.av !== localHash) downloadAvatar(); return; }
+  // guests (and accounts without a saved picture): the server forgets the picture 5 minutes after you
+  // disconnect, so re-send it from this browser's cache
+  if (local && S.me.av !== localHash) uploadAvatar();
+}
+async function downloadAvatar() {
+  try {
+    const res = await fetch(`/avatar/${S.me.id}?v=${S.me.av}`); if (!res.ok) return;
+    const blob = await res.blob();
+    const data = await new Promise((ok, fail) => { const fr = new FileReader(); fr.onload = () => ok(fr.result); fr.onerror = fail; fr.readAsDataURL(blob); });
+    LS.set('sitshow.avatar', data); LS.set('sitshow.avatarHash', S.me.av);
+    renderMe();
+  } catch {}
 }
 for (const b of $$('[data-avatar-upload]')) b.addEventListener('click', () => $('avatarFile').click());
 $('avatarFile').addEventListener('change', (e) => { handleAvatarFile(e.target.files[0]); e.target.value = ''; });
@@ -1620,6 +1634,70 @@ function drawGallery(gal, t) {
   g.fillStyle = '#ffc83d'; g.font = `12px ${FONT_D}`; g.textAlign = 'center'; g.textBaseline = 'middle';
   g.fillText('THE GALLERY', x0 + gw / 2 + 2, sy - 1, gw - 28);
 }
+// The DJ: a booth above the crowd, beside the gallery, playing along with the show
+function drawDJ(t, r) {
+  const playing = r.phase === 'music', pulse = BEAT.pulse, k = clamp(W / 820, 0.95, 1.35);
+  const bw = 170 * k, bh = 56 * k, right = (galleryOn ? W - galleryWidth() : W) - 40 * k, x0 = right - bw, base = H - 66; // above the crowd's heads
+  const cx = x0 + bw / 2, top = base - bh;
+  // speakers either side, cones thumping on the beat
+  for (const sx of [x0 - 30 * k, right + 4 * k]) {
+    const sw = 26 * k, sh = 58 * k, sy = base - sh;
+    g.fillStyle = '#16121f'; rrect(g, sx, sy, sw, sh, 4); g.fill();
+    g.strokeStyle = '#3a3448'; g.lineWidth = 1.5; rrect(g, sx, sy, sw, sh, 4); g.stroke();
+    for (const [fy, rr] of [[0.3, 0.32], [0.72, 0.4]]) {
+      const c = 1 + 0.18 * pulse;
+      g.fillStyle = '#2b2538'; ellipse(g, sx + sw / 2, sy + sh * fy, sw * rr * c, sw * rr * c); g.fill();
+      g.fillStyle = '#0b0910'; ellipse(g, sx + sw / 2, sy + sh * fy, sw * rr * 0.45 * c, sw * rr * 0.45 * c); g.fill();
+    }
+  }
+  // the DJ, behind the decks
+  const bob = playing ? Math.abs(Math.sin(t * 5.2)) * 3 + pulse * 7 : r.phase === 'scramble' ? Math.sin(t * 14) * 1.2 : Math.sin(t * 1.6) * 1.5;
+  const dx = cx, dy = top - 4 * k - bob;
+  g.save(); g.translate(dx, dy); g.scale(k, k);
+  g.fillStyle = '#5b2bd1'; rrect(g, -22, -30, 44, 34, 12); g.fill(); // hoodie
+  g.fillStyle = '#3d1c96'; rrect(g, -22, -6, 44, 10, 4); g.fill();
+  // arms: one scratching, one pumping on the beat while the music plays
+  const scratch = playing ? Math.sin(t * 9) * 9 : 0, pump = playing && pulse > 0.35 && Math.floor(BEAT.at / 300) % 2;
+  g.strokeStyle = '#5b2bd1'; g.lineWidth = 9; g.lineCap = 'round';
+  g.beginPath(); g.moveTo(-18, -22); g.lineTo(-34 + scratch, 4); g.stroke();
+  g.beginPath(); g.moveTo(18, -22); pump ? g.lineTo(30, -58) : g.lineTo(30, 4); g.stroke();
+  g.fillStyle = '#f2c9a0'; ellipse(g, -34 + scratch, 4, 5, 5); g.fill(); ellipse(g, pump ? 30 : 30, pump ? -58 : 4, 5, 5); g.fill();
+  // head, shades, cap and headphones
+  g.fillStyle = '#f2c9a0'; ellipse(g, 0, -46, 16, 17); g.fill();
+  g.fillStyle = '#111'; rrect(g, -12, -50, 10, 6, 2); g.fill(); rrect(g, 2, -50, 10, 6, 2); g.fill(); g.fillRect(-2, -48, 4, 2);
+  g.fillStyle = '#ff3d81'; g.beginPath(); g.arc(0, -52, 16, Math.PI, 0); g.fill(); g.fillRect(-2, -55, 22, 5); // cap
+  g.strokeStyle = '#1b1b1b'; g.lineWidth = 3.5; g.beginPath(); g.arc(0, -48, 19, Math.PI * 1.05, Math.PI * 1.95); g.stroke();
+  g.fillStyle = '#222'; rrect(g, -22, -50, 7, 13, 3); g.fill(); rrect(g, 15, -50, 7, 13, 3); g.fill();
+  g.restore();
+  // booth front
+  const fg = g.createLinearGradient(0, top, 0, base);
+  fg.addColorStop(0, '#231a36'); fg.addColorStop(1, '#120c1e');
+  g.fillStyle = fg; g.beginPath(); g.moveTo(x0, top); g.lineTo(right, top); g.lineTo(right - 8 * k, base); g.lineTo(x0 + 8 * k, base); g.closePath(); g.fill();
+  g.strokeStyle = '#ffc83d'; g.lineWidth = 2; g.stroke();
+  // LED strip: chases slowly, flashes with the beat
+  const n = 14;
+  for (let i = 0; i < n; i++) {
+    const lx = x0 + 16 * k + (i * (bw - 32 * k)) / (n - 1), on = playing ? pulse > 0.3 || (i + Math.floor(t * 10)) % 3 === 0 : (i + Math.floor(t * 3)) % 4 === 0;
+    g.fillStyle = on ? `hsl(${(BEAT.hue + i * 18) % 360} 95% 62%)` : '#3a2c4f';
+    if (on) { g.shadowColor = g.fillStyle; g.shadowBlur = 8; }
+    ellipse(g, lx, top + bh * 0.62, 2.6 * k, 2.6 * k); g.fill(); g.shadowBlur = 0;
+  }
+  g.fillStyle = '#ffc83d'; g.font = `${Math.round(13 * k)}px ${FONT_D}`; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText('DJ SIT-N-SPIN', cx, top + bh * 0.3);
+  // deck top: two turntables and a mixer
+  g.fillStyle = '#2d2442'; g.fillRect(x0, top - 8 * k, bw, 8 * k);
+  const spin = playing ? t * 7 : r.phase === 'lobby' || r.phase === 'ready' || r.phase === 'intro' ? t * 2.5 : 0;
+  for (const tx of [x0 + bw * 0.24, x0 + bw * 0.76]) {
+    const rr = 21 * k;
+    g.fillStyle = '#0d0b12'; ellipse(g, tx, top - 4 * k, rr, rr * 0.32); g.fill();
+    g.strokeStyle = '#3a3448'; g.lineWidth = 1; ellipse(g, tx, top - 4 * k, rr * 0.7, rr * 0.22); g.stroke();
+    g.fillStyle = '#ff3d81'; ellipse(g, tx, top - 4 * k, rr * 0.25, rr * 0.08); g.fill();
+    g.strokeStyle = 'rgba(255,255,255,.55)'; g.lineWidth = 1.5; g.beginPath(); // a mark on the record shows it spinning
+    g.moveTo(tx, top - 4 * k); g.lineTo(tx + Math.cos(spin) * rr * 0.9, top - 4 * k + Math.sin(spin) * rr * 0.29); g.stroke();
+  }
+  g.fillStyle = '#16121f'; g.fillRect(cx - 14 * k, top - 10 * k, 28 * k, 8 * k);
+  for (let i = 0; i < 4; i++) { g.fillStyle = playing && (i + Math.floor(t * 6)) % 2 ? '#19e3c9' : '#5a5370'; g.fillRect(cx - 11 * k + i * 6.5 * k, top - 8 * k, 3 * k, 4 * k); }
+}
 function drawAudience(t, r) {
   const mood = r.phase === 'music' ? 1 : r.phase === 'results' || r.phase === 'gameover' ? 2 : r.phase === 'scramble' ? 3 : 0;
   const Z = 1.35; // crowd size
@@ -1995,6 +2073,7 @@ function frame(now) {
       drawTag(g, e.x, e.y + jump, e.sc * 0.9, p, p.id === S.me.id);
     }
   }
+  if (innerWidth > 900 && W >= 760) drawDJ(t, r); // desktop only
   drawAudience(t, r);
 
   // emote bubbles float above everything
