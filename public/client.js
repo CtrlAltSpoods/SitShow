@@ -1933,6 +1933,7 @@ function dancePose(id, t) {
     case 'bounce': { const h = a(s(t * 7)); return { dy: -h * 20, hl: { x: -4, y: -18 - h * 10 }, hr: { x: 4, y: -18 - h * 10 }, fl: { x: 0, y: h * 3 }, fr: { x: 0, y: h * 3 } }; }
     case 'wiggle': return { rot: s(t * 10) * 0.22, bx: s(t * 10) * 4, hl: { x: s(t * 10) * 5, y: -6 }, hr: { x: s(t * 10) * 5, y: -6 }, fl: { x: -s(t * 10) * 2, y: 0 }, fr: { x: -s(t * 10) * 2, y: 0 } };
     case 'conga': { const k = Math.max(0, s(t * 6)), k2 = Math.max(0, -s(t * 6)); return { dy: -a(s(t * 12)) * 3, hl: { x: 6, y: -10 }, hr: { x: -6, y: -10 }, fl: { x: -k2 * 16, y: -k2 * 6 }, fr: { x: k * 16, y: -k * 6 }, rot: (k - k2) * 0.08 }; }
+    case 'hopspin': { const h = a(s(t * 7)); return { sx: c(t * 6), dy: -h * 20, hl: { x: -4, y: -18 - h * 10 }, hr: { x: 4, y: -18 - h * 10 }, fl: { x: 0, y: h * 3 }, fr: { x: 0, y: h * 3 } }; } // Pogo + Twirl
     case 'spin': return { sx: c(t * 6), dy: -a(s(t * 6)) * 5, hl: { x: -10, y: -8 }, hr: { x: 10, y: -8 }, fl: Z, fr: Z };
     case 'moonwalk': { const p = (t * 1.6) % 1, q = (t * 1.6 + 0.5) % 1; return { rot: -0.12, bx: s(t * 10) * 1.5, hl: { x: 4, y: 4 }, hr: { x: -12, y: -34 }, fl: { x: (p - 0.5) * 18, y: p > 0.8 ? -4 : 0 }, fr: { x: (q - 0.5) * 18, y: q > 0.8 ? -4 : 0 } }; }
     case 'robot': { const q = Math.floor(t * 4) % 4; return { rot: [0.1, 0, -0.1, 0][q], dy: q % 2 ? -3 : 0, hl: { x: -4, y: [-22, 0, 6, 0][q] }, hr: { x: 4, y: [6, 0, -22, 0][q] }, fl: { x: 0, y: q === 1 ? -5 : 0 }, fr: { x: 0, y: q === 3 ? -5 : 0 } }; }

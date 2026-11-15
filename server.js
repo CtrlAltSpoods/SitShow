@@ -72,6 +72,7 @@ const CATALOG = {
     { id: 'dab', name: 'Dab', level: 18 },
     { id: 'flip', name: 'Backflip', level: 22 },
     { id: 'levitate', name: 'Levitate', level: 26 },
+    { id: 'hopspin', name: 'Hop & Spin', level: 28 },
   ],
   deaths: [
     { id: 'poof', name: 'Poof', level: 1 },

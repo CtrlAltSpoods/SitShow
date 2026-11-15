@@ -182,8 +182,8 @@ marker on their tab. You can still switch to one yourself.
   leaderboards and player cards while they're offline and follows them to new devices.
 - **Emotes**, **levels and XP**, and unlockable **dances**, **dramatic exits**,
   **avatar frames** and more emotes. The wardrobe sits in the profile panel on the
-  home page and behind 🎭 in a show, in the order they unlock; you can preview locked items. There are 15 dances (up
-  to *Levitate* at level 26) and 11 frames; the higher frames are fully animated: *Inferno*
+  home page and behind 🎭 in a show, in the order they unlock; you can preview locked items. There are 16 dances (up
+  to *Hop & Spin* at level 28) and 11 frames; the higher frames are fully animated: *Inferno*
   (11), *Tesla Coil* (17), *Galaxy* with orbiting planets (23), *Phoenix* wings (27) and
   *Cosmic Legend* (30).
 - Up to **30 players** per show (bots included). Big shows use two rings of chairs and
